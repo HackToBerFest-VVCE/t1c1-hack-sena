@@ -1,0 +1,86 @@
+.stub-page {
+  max-width: 900px;
+  margin: 2rem auto;
+  padding: 0 1.5rem;
+}
+
+.stub-page h2 {
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 0.75rem;
+}
+
+.stub-muted {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+/* audit log table */
+.audit-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.audit-table thead th {
+  background: var(--blue-light);
+  color: var(--blue-dark);
+  font-weight: 700;
+  text-align: left;
+  padding: 0.6rem 0.9rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.audit-table tbody tr:nth-child(odd) td {
+  background: var(--white);
+}
+
+.audit-table tbody tr:nth-child(even) td {
+  background: var(--bg);
+}
+
+.audit-table tbody td {
+  padding: 0.55rem 0.9rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.audit-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.mono {
+  font-family: 'Fira Mono', 'Consolas', monospace;
+  font-size: 0.82rem;
+}
+
+.audit-action {
+  background: var(--blue-light);
+  color: var(--blue-dark);
+  border-radius: 4px;
+  padding: 0.15rem 0.5rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  font-family: 'Fira Mono', 'Consolas', monospace;
+  white-space: nowrap;
+}
+
+.back-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--blue);
+  border-radius: 6px;
+  padding: 0.35rem 0.85rem;
+  font-size: 0.85rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.back-btn:hover {
+  background: var(--blue-light);
+}

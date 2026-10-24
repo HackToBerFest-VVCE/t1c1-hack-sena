@@ -1,0 +1,133 @@
+.layout {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+/* ── header ──────────────────────────────────────────────────────────────── */
+
+.layout-header {
+  height: 60px;
+  background: var(--blue);
+  display: flex;
+  align-items: center;
+  padding: 0 1.5rem;
+  gap: 1.5rem;
+  box-shadow: 0 2px 8px rgba(26, 86, 219, 0.3);
+  flex-shrink: 0;
+}
+
+/* brand */
+.layout-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  text-decoration: none;
+  flex-shrink: 0;
+}
+
+.layout-icon {
+  font-size: 1.2rem;
+}
+
+.layout-name {
+  font-size: 1.05rem;
+  font-weight: 800;
+  color: #ffffff;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+/* nav links */
+.layout-nav {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex: 1;
+}
+
+.layout-nav-link {
+  color: rgba(255, 255, 255, 0.75);
+  text-decoration: none;
+  font-size: 0.875rem;
+  font-weight: 500;
+  padding: 0.35rem 0.75rem;
+  border-radius: 6px;
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+
+.layout-nav-link:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+}
+
+.layout-nav-link.active {
+  background: rgba(255, 255, 255, 0.18);
+  color: #ffffff;
+  font-weight: 700;
+}
+
+/* user section */
+.layout-user {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  flex-shrink: 0;
+}
+
+.layout-user-info {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.layout-user-name {
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 0.875rem;
+  white-space: nowrap;
+}
+
+.layout-role-badge {
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.18rem 0.55rem;
+  border-radius: 20px;
+  white-space: nowrap;
+}
+
+.layout-role-badge[data-role='Reviewer'] {
+  background: rgba(255, 255, 255, 0.2);
+  color: #ffffff;
+}
+
+.layout-role-badge[data-role='Supervisor'] {
+  background: #fbbf24;
+  color: #1a202c;
+}
+
+.layout-logout {
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  color: #ffffff;
+  border-radius: 6px;
+  padding: 0.3rem 0.75rem;
+  font-size: 0.8rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s;
+  white-space: nowrap;
+}
+
+.layout-logout:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+/* ── page content ────────────────────────────────────────────────────────── */
+
+.layout-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}

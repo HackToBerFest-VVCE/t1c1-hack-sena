@@ -1,0 +1,394 @@
+/* ── page shell ──────────────────────────────────────────────────────────── */
+
+.up-page {
+  max-width: 680px;
+  margin: 2rem auto;
+  padding: 0 1.5rem 3rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+/* ── heading ─────────────────────────────────────────────────────────────── */
+
+.up-heading {}
+
+.up-title {
+  font-size: 1.45rem;
+  font-weight: 800;
+  color: var(--text);
+  letter-spacing: -0.02em;
+  margin: 0 0 0.3rem;
+}
+
+.up-subtitle {
+  font-size: 0.875rem;
+  color: var(--muted);
+  margin: 0;
+  line-height: 1.5;
+}
+
+/* ── card ────────────────────────────────────────────────────────────────── */
+
+.up-card {
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  overflow: hidden;
+}
+
+/* ── drop zone ───────────────────────────────────────────────────────────── */
+
+.up-drop {
+  border: 2px dashed var(--border);
+  border-radius: 8px;
+  margin: 1.25rem;
+  padding: 2.75rem 1rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.4rem;
+  cursor: pointer;
+  background: var(--bg);
+  text-align: center;
+  transition: border-color 0.16s, background 0.16s;
+  outline: none;
+  min-height: 160px;
+  justify-content: center;
+}
+
+.up-drop:focus-visible {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(26, 86, 219, 0.18);
+}
+
+.up-drop:hover:not(.up-drop-busy) {
+  border-color: var(--blue-mid);
+  background: var(--blue-light);
+}
+
+.up-drop.dragging {
+  border-color: var(--blue);
+  background: var(--blue-light);
+}
+
+.up-drop.up-drop-busy {
+  cursor: default;
+  border-style: solid;
+  border-color: var(--border);
+  background: var(--bg);
+}
+
+.up-drop-icon {
+  font-size: 2.4rem;
+  line-height: 1;
+  margin-bottom: 0.25rem;
+}
+
+.up-drop-label {
+  font-size: 0.975rem;
+  color: var(--text);
+  margin: 0;
+}
+
+.up-drop-label strong {
+  color: var(--blue);
+}
+
+.up-drop-label span {
+  color: var(--muted);
+}
+
+.up-drop-hint {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin: 0;
+}
+
+/* ── progress states inside drop zone ───────────────────────────────────── */
+
+.up-progress-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.up-progress-msg {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--blue);
+}
+
+.up-spinner {
+  display: block;
+  width: 36px;
+  height: 36px;
+  border: 3px solid var(--blue-light);
+  border-top-color: var(--blue);
+  border-radius: 50%;
+  animation: up-spin 0.75s linear infinite;
+}
+
+@keyframes up-spin { to { transform: rotate(360deg); } }
+
+.up-done .up-done-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: #22c55e;
+  color: #ffffff;
+  font-size: 1.4rem;
+  font-weight: 700;
+}
+
+.up-done .up-progress-msg {
+  color: #15803d;
+}
+
+/* ── file list ───────────────────────────────────────────────────────────── */
+
+.up-file-list {
+  border-top: 1px solid var(--border);
+  padding: 0.75rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.up-file-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.up-file-count {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.up-total-size {
+  font-weight: 400;
+}
+
+.up-clear-all {
+  background: none;
+  border: none;
+  font-size: 0.78rem;
+  color: var(--muted);
+  cursor: pointer;
+  font-family: inherit;
+  transition: color 0.14s;
+  padding: 0;
+}
+.up-clear-all:hover { color: var(--error); }
+
+/* file rows */
+.up-files {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.up-file-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg);
+  transition: background 0.13s;
+}
+
+.up-file-item:hover:not(.up-file-item-busy) {
+  background: var(--blue-light);
+}
+
+.up-file-item-busy {
+  opacity: 0.7;
+}
+
+.up-file-icon {
+  font-size: 1.05rem;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.up-file-name {
+  flex: 1;
+  font-size: 0.875rem;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.up-file-size {
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-family: 'Fira Mono', 'Consolas', monospace;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.up-remove-btn {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 0.8rem;
+  cursor: pointer;
+  padding: 0.15rem 0.3rem;
+  border-radius: 4px;
+  line-height: 1;
+  transition: background 0.12s, color 0.12s;
+  flex-shrink: 0;
+}
+.up-remove-btn:hover { background: #fee2e2; color: var(--error); }
+
+.up-file-status-spinner {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+
+.up-mini-spinner {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  border: 2px solid var(--border);
+  border-top-color: var(--blue);
+  border-radius: 50%;
+  animation: up-spin 0.7s linear infinite;
+}
+
+/* ── error banner ────────────────────────────────────────────────────────── */
+
+.up-error {
+  margin: 0 1.25rem;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  background: var(--error-bg);
+  border: 1px solid #fca5a5;
+  border-radius: 7px;
+  padding: 0.7rem 0.9rem;
+  font-size: 0.875rem;
+  color: var(--error);
+}
+
+.up-error-icon { flex-shrink: 0; }
+
+.up-error span:nth-child(2) { flex: 1; line-height: 1.5; }
+
+.up-error-dismiss {
+  background: none;
+  border: none;
+  color: var(--error);
+  opacity: 0.6;
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 0;
+  flex-shrink: 0;
+  transition: opacity 0.13s;
+  line-height: 1;
+}
+.up-error-dismiss:hover { opacity: 1; }
+
+/* ── actions ─────────────────────────────────────────────────────────────── */
+
+.up-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 1rem 1.25rem;
+  border-top: 1px solid var(--border);
+}
+
+.up-submit-btn {
+  background: var(--blue);
+  color: var(--white);
+  border: none;
+  border-radius: 7px;
+  padding: 0.65rem 1.5rem;
+  font-size: 0.95rem;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  transition: background 0.16s;
+  white-space: nowrap;
+}
+.up-submit-btn:hover:not(:disabled) { background: var(--blue-dark); }
+.up-submit-btn:disabled             { opacity: 0.5; cursor: not-allowed; }
+
+.up-btn-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255,255,255,0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: up-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
+.up-secondary-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 7px;
+  padding: 0.65rem 1rem;
+  font-size: 0.9rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color 0.14s, color 0.14s;
+  white-space: nowrap;
+}
+.up-secondary-btn:hover { border-color: var(--blue); color: var(--blue); }
+
+/* ── tips ────────────────────────────────────────────────────────────────── */
+
+.up-tips {
+  background: var(--blue-light);
+  border: 1px solid #c3d4f8;
+  border-radius: var(--radius);
+  padding: 1rem 1.25rem;
+}
+
+.up-tips-title {
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--blue-dark);
+  margin: 0 0 0.5rem;
+}
+
+.up-tips-list {
+  margin: 0;
+  padding-left: 1.2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.up-tips-list li {
+  font-size: 0.85rem;
+  color: var(--blue-dark);
+  line-height: 1.45;
+}

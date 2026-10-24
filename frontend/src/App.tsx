@@ -274,13 +274,6 @@ export default function App() {
 
   return (
     <div className="app">
-      {/* ── header ── */}
-      <header className="header">
-        <div className="header-icon">🔍</div>
-        <h1>ClaimLens AI</h1>
-        <span className="header-subtitle">Hospital Bill Extractor</span>
-      </header>
-
       {/* ── main ── */}
       <main className="main">
 
