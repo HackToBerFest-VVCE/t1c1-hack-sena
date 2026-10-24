@@ -1,0 +1,30 @@
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --blue:       #1a56db;
+  --blue-light: #e8f0fe;
+  --blue-mid:   #3b7de8;
+  --blue-dark:  #1240ab;
+  --border:     #d1daea;
+  --bg:         #f4f7fc;
+  --white:      #ffffff;
+  --text:       #1a202c;
+  --muted:      #64748b;
+  --error:      #dc2626;
+  --error-bg:   #fef2f2;
+  --radius:     10px;
+  font-family: Inter, system-ui, Helvetica, Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  min-height: 100vh;
+}

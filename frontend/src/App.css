@@ -1,0 +1,456 @@
+/* ── layout ──────────────────────────────────────────────────────────────── */
+
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── header ──────────────────────────────────────────────────────────────── */
+
+.header {
+  background: var(--blue);
+  color: var(--white);
+  padding: 0 2rem;
+  height: 60px;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  box-shadow: 0 2px 8px rgba(26, 86, 219, 0.25);
+}
+
+.header-icon {
+  width: 30px;
+  height: 30px;
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+}
+
+.header h1 {
+  font-size: 1.2rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.header-subtitle {
+  font-size: 0.78rem;
+  opacity: 0.75;
+  margin-left: 0.25rem;
+}
+
+/* ── main content ────────────────────────────────────────────────────────── */
+
+.main {
+  flex: 1;
+  max-width: 900px;
+  width: 100%;
+  margin: 2rem auto;
+  padding: 0 1.5rem 3rem;
+}
+
+/* ── upload section ──────────────────────────────────────────────────────── */
+
+.upload-section {
+  background: var(--white);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  padding: 1.75rem;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+}
+
+.drop-zone {
+  border: 2px dashed var(--border);
+  border-radius: 8px;
+  padding: 2.5rem 1rem;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.18s, background 0.18s;
+  background: var(--bg);
+  position: relative;
+}
+
+.drop-zone:hover,
+.drop-zone.dragging {
+  border-color: var(--blue);
+  background: var(--blue-light);
+}
+
+.drop-zone input[type="file"] {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+  width: 100%;
+  height: 100%;
+}
+
+.drop-icon {
+  font-size: 2.2rem;
+  margin-bottom: 0.5rem;
+}
+
+.drop-label {
+  font-size: 0.95rem;
+  color: var(--muted);
+}
+
+.drop-label strong {
+  color: var(--blue);
+}
+
+.drop-hint {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-top: 0.3rem;
+}
+
+/* file list */
+.file-list {
+  margin-top: 1rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.file-chip {
+  background: var(--blue-light);
+  color: var(--blue-dark);
+  border: 1px solid #c3d4f8;
+  border-radius: 20px;
+  padding: 0.2rem 0.75rem 0.2rem 0.6rem;
+  font-size: 0.82rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.file-chip button {
+  background: none;
+  border: none;
+  color: var(--blue-dark);
+  cursor: pointer;
+  font-size: 0.9rem;
+  padding: 0;
+  line-height: 1;
+  opacity: 0.6;
+  transition: opacity 0.15s;
+}
+
+.file-chip button:hover {
+  opacity: 1;
+}
+
+/* actions row */
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 1.25rem;
+}
+
+.btn-upload {
+  background: var(--blue);
+  color: var(--white);
+  border: none;
+  border-radius: 7px;
+  padding: 0.6rem 1.5rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.18s;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.btn-upload:hover:not(:disabled) {
+  background: var(--blue-dark);
+}
+
+.btn-upload:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn-clear {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 7px;
+  padding: 0.6rem 1rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.btn-clear:hover {
+  border-color: var(--blue);
+  color: var(--blue);
+}
+
+/* spinner */
+.spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255,255,255,0.35);
+  border-top-color: var(--white);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── error banner ────────────────────────────────────────────────────────── */
+
+.error-banner {
+  background: var(--error-bg);
+  border: 1px solid #fca5a5;
+  color: var(--error);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  margin-top: 1.25rem;
+  font-size: 0.9rem;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+/* ── results ─────────────────────────────────────────────────────────────── */
+
+.results {
+  margin-top: 2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.results-heading {
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin-bottom: -0.5rem;
+}
+
+/* ── result card ─────────────────────────────────────────────────────────── */
+
+.card {
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  overflow: hidden;
+}
+
+.card-header {
+  background: var(--blue);
+  color: var(--white);
+  padding: 0.8rem 1.25rem;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.card-icon {
+  font-size: 1.1rem;
+}
+
+.card-filename {
+  font-weight: 600;
+  font-size: 0.97rem;
+  flex: 1;
+  word-break: break-all;
+}
+
+.card-pages {
+  font-size: 0.8rem;
+  opacity: 0.8;
+  white-space: nowrap;
+}
+
+.card-body {
+  padding: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+/* error card variant */
+.card.card-error .card-header {
+  background: var(--error);
+}
+
+.card-error-msg {
+  padding: 1rem 1.25rem;
+  color: var(--error);
+  font-size: 0.9rem;
+}
+
+/* ── section labels ──────────────────────────────────────────────────────── */
+
+.section-label {
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--blue);
+  margin-bottom: 0.6rem;
+}
+
+/* ── fields table ────────────────────────────────────────────────────────── */
+
+.fields-grid {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 0 0;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  overflow: hidden;
+  font-size: 0.875rem;
+}
+
+.fields-grid .field-key {
+  background: var(--blue-light);
+  color: var(--muted);
+  font-weight: 600;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.fields-grid .field-val {
+  background: var(--white);
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  word-break: break-word;
+}
+
+.fields-grid .field-key:last-of-type,
+.fields-grid .field-val:last-of-type {
+  border-bottom: none;
+}
+
+/* when there are an odd number, the last pair should also drop the bottom border */
+.fields-grid > *:nth-last-child(-n+2) {
+  border-bottom: none;
+}
+
+.null-val {
+  color: #b0bec5;
+  font-style: italic;
+}
+
+/* ── line items table ────────────────────────────────────────────────────── */
+
+.line-items-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.line-items-table thead th {
+  background: var(--blue-light);
+  color: var(--blue-dark);
+  font-weight: 700;
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border);
+}
+
+.line-items-table thead th:last-child {
+  text-align: right;
+}
+
+.line-items-table tbody tr:nth-child(odd) td {
+  background: var(--white);
+}
+
+.line-items-table tbody tr:nth-child(even) td {
+  background: var(--bg);
+}
+
+.line-items-table tbody td {
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border);
+}
+
+.line-items-table tbody td:last-child {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.line-items-table tfoot td {
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--border);
+  font-weight: 700;
+}
+
+.line-items-table tfoot td:last-child {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--blue-dark);
+}
+
+.total-mismatch {
+  color: var(--error);
+}
+
+/* ── collapsible raw text ────────────────────────────────────────────────── */
+
+.raw-toggle {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 6px;
+  padding: 0.4rem 0.8rem;
+  font-size: 0.82rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  transition: border-color 0.15s, color 0.15s;
+  font-family: inherit;
+}
+
+.raw-toggle:hover {
+  border-color: var(--blue);
+  color: var(--blue);
+}
+
+.raw-block {
+  background: #f8faff;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 0.9rem 1rem;
+  font-family: 'Fira Mono', 'Consolas', monospace;
+  font-size: 0.78rem;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #374151;
+  max-height: 300px;
+  overflow-y: auto;
+  margin-top: 0.5rem;
+}
+
+/* ── note pill (image placeholder) ──────────────────────────────────────── */
+
+.note-pill {
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  color: #92400e;
+  border-radius: 6px;
+  padding: 0.5rem 0.85rem;
+  font-size: 0.85rem;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
