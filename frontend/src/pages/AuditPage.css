@@ -1,0 +1,397 @@
+/* ── page shell ──────────────────────────────────────────────────────────── */
+
+.au-page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 2rem 1.5rem 3rem;
+}
+
+/* ── heading ─────────────────────────────────────────────────────────────── */
+
+.au-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1.25rem;
+}
+
+.au-heading-left {}
+
+.au-title {
+  font-size: 1.45rem;
+  font-weight: 800;
+  color: var(--text);
+  letter-spacing: -0.02em;
+  margin: 0 0 0.2rem;
+}
+
+.au-subtitle {
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin: 0;
+}
+
+.au-total-badge {
+  background: var(--blue-light);
+  border: 1px solid #c3d4f8;
+  color: var(--blue-dark);
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 0.3rem 0.8rem;
+  border-radius: 20px;
+  white-space: nowrap;
+  align-self: flex-start;
+  margin-top: 0.35rem;
+}
+
+/* ── filter bar ──────────────────────────────────────────────────────────── */
+
+.au-filters {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+
+.au-search-wrap {
+  position: relative;
+  width: 280px;
+}
+
+.au-search-icon {
+  position: absolute;
+  left: 0.7rem;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 0.82rem;
+  pointer-events: none;
+}
+
+.au-search-input {
+  width: 100%;
+  padding: 0.55rem 0.8rem 0.55rem 2.1rem;
+  border: 1.5px solid var(--border);
+  border-radius: 7px;
+  font-size: 0.875rem;
+  font-family: inherit;
+  color: var(--text);
+  background: var(--white);
+  outline: none;
+  transition: border-color 0.16s;
+}
+.au-search-input:focus { border-color: var(--blue); }
+
+.au-clear-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 6px;
+  padding: 0.45rem 0.75rem;
+  font-size: 0.82rem;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.14s, color 0.14s;
+}
+.au-clear-btn:hover       { border-color: var(--blue); color: var(--blue); }
+.au-clear-btn.inline      { margin-left: 0.5rem; }
+
+/* ── states ──────────────────────────────────────────────────────────────── */
+
+.au-loading {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+  padding: 2rem 0;
+}
+
+.au-spinner {
+  display: inline-block;
+  width: 15px;
+  height: 15px;
+  border: 2px solid var(--border);
+  border-top-color: var(--blue);
+  border-radius: 50%;
+  animation: au-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes au-spin { to { transform: rotate(360deg); } }
+
+.au-error {
+  color: var(--error);
+  background: var(--error-bg);
+  border: 1px solid #fca5a5;
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  font-size: 0.9rem;
+}
+
+.au-empty {
+  text-align: center;
+  color: var(--muted);
+  padding: 3rem 1rem;
+  font-size: 0.95rem;
+}
+
+/* ── table wrapper ───────────────────────────────────────────────────────── */
+
+.au-table-wrap {
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  overflow-x: auto;
+}
+
+.au-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+  min-width: 780px;
+}
+
+.au-table thead th {
+  background: var(--blue-light);
+  color: var(--blue-dark);
+  font-weight: 700;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.055em;
+  padding: 0.65rem 1rem;
+  text-align: left;
+  border-bottom: 2px solid var(--border);
+  white-space: nowrap;
+}
+
+/* column widths */
+.col-ts      { width: 130px; }
+.col-user    { width: 190px; }
+.col-action  { width: 170px; }
+.col-claim   { width: 130px; }
+.col-before  { }
+.col-after   { }
+.col-expand  { width: 36px; text-align: center; }
+
+/* ── body rows ───────────────────────────────────────────────────────────── */
+
+.au-row {
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+  transition: background 0.12s;
+}
+.au-row:last-child                 { border-bottom: none; }
+.au-row:nth-child(odd)  td         { background: var(--white); }
+.au-row:nth-child(even) td         { background: var(--bg); }
+.au-row:hover td                   { background: #dbeafe !important; }
+.au-row:focus                      { outline: 2px solid var(--blue); outline-offset: -2px; }
+.au-row:focus td                   { background: #dbeafe !important; }
+.au-row.au-row-expanded td         { background: var(--blue-light) !important; }
+
+.au-table td {
+  padding: 0.7rem 1rem;
+  vertical-align: middle;
+}
+
+/* timestamp */
+.au-date {
+  display: block;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text);
+  font-family: 'Fira Mono', 'Consolas', monospace;
+  white-space: nowrap;
+}
+.au-time {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-family: 'Fira Mono', 'Consolas', monospace;
+  white-space: nowrap;
+}
+
+/* user */
+.col-user td,
+td.col-user {
+  white-space: nowrap;
+}
+.col-user {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* We can't use flex on a td directly, so use a wrapper instead */
+.au-table td.col-user {
+  vertical-align: middle;
+}
+
+.au-user-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--blue);
+  color: var(--white);
+  font-size: 0.7rem;
+  font-weight: 800;
+  flex-shrink: 0;
+  margin-right: 0.45rem;
+  vertical-align: middle;
+}
+
+.au-user-email {
+  font-size: 0.82rem;
+  color: var(--text);
+}
+
+/* action badge */
+.au-action {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  font-family: 'Fira Mono', 'Consolas', monospace;
+  padding: 0.2rem 0.55rem;
+  border-radius: 5px;
+  white-space: nowrap;
+  letter-spacing: 0.02em;
+}
+.au-action-default   { background: var(--blue-light); color: var(--blue-dark); }
+.au-action-approved  { background: #dcfce7; color: #14532d; }
+.au-action-escalated { background: #fee2e2; color: #991b1b; }
+.au-action-queried   { background: #fef3c7; color: #92400e; }
+.au-action-updated   { background: #f3e8ff; color: #581c87; }
+
+/* claim link */
+.au-claim-link {
+  background: none;
+  border: none;
+  color: var(--blue);
+  font-family: 'Fira Mono', 'Consolas', monospace;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  transition: color 0.13s;
+}
+.au-claim-link:hover { color: var(--blue-dark); }
+
+/* snapshot (collapsed) */
+.au-snap-collapsed {
+  max-width: 200px;
+}
+
+.au-snapshot {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.au-snapshot li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.3rem;
+  font-size: 0.78rem;
+  flex-wrap: wrap;
+}
+
+.au-snap-key {
+  font-weight: 700;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.au-snap-sep {
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.au-snap-val {
+  color: var(--text);
+  font-family: 'Fira Mono', 'Consolas', monospace;
+  word-break: break-word;
+}
+
+.au-null {
+  color: var(--muted);
+  font-style: italic;
+  font-size: 0.82rem;
+}
+
+/* expand chevron */
+.au-chevron {
+  font-size: 0.7rem;
+  color: var(--muted);
+  display: block;
+  text-align: center;
+}
+
+/* ── expanded detail row ─────────────────────────────────────────────────── */
+
+.au-detail-row td {
+  background: #f0f6ff !important;
+  padding: 0;
+  border-bottom: 2px solid var(--blue-light);
+}
+
+.au-detail {
+  display: flex;
+  align-items: flex-start;
+  gap: 1.25rem;
+  padding: 1rem 1.25rem;
+  flex-wrap: wrap;
+}
+
+.au-detail-col {
+  flex: 1;
+  min-width: 160px;
+}
+
+.au-detail-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--blue-dark);
+  margin: 0 0 0.4rem;
+}
+
+.au-detail-col .au-snapshot {
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem 0.7rem;
+}
+
+.au-detail-col .au-snapshot li {
+  font-size: 0.83rem;
+}
+
+.au-detail-arrow {
+  font-size: 1.2rem;
+  color: var(--muted);
+  align-self: center;
+  flex-shrink: 0;
+}
+
+.au-detail-meta {
+  flex-shrink: 0;
+  min-width: 140px;
+}
+
+.au-mono {
+  font-family: 'Fira Mono', 'Consolas', monospace;
+  font-size: 0.78rem;
+  color: var(--muted);
+  word-break: break-all;
+}
