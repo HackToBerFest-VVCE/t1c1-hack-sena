@@ -21,7 +21,7 @@ export default function Layout() {
         </div>
 
         <nav className="layout-nav">
-          <NavLink to="/"       end className={navCls}>Dashboard</NavLink>
+          <NavLink to="/"       end className={navCls}>Claims Queue</NavLink>
           <NavLink to="/upload"     className={navCls}>Upload</NavLink>
           {user?.role === 'Supervisor' && (
             <NavLink to="/audit" className={navCls}>Audit Log</NavLink>

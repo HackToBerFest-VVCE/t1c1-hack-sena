@@ -1,17 +1,19 @@
-import { useEffect, useRef, useState } from 'react'
+import { Component, useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { getClaim, updateField, submitDecision } from '../api'
+import { getClaim, updateField, submitDecision, getPageImageUrl } from '../api'
 import type { Claim, Document, Field, Finding, RiskLevel, ClaimStatus } from '../types'
 import './ClaimDetailPage.css'
 
-// ─── tiny helpers ────────────────────────────────────────────────────────────
+// ── helpers ───────────────────────────────────────────────────────────────────
 
 const DOC_TYPE_LABEL: Record<string, string> = {
-  hospital_bill:      'Hospital Bill',
-  claim_form:         'Claim Form',
-  discharge_summary:  'Discharge Summary',
-  prescription:       'Prescription',
+  hospital_bill:     'Hospital Bill',
+  claim_form:        'Claim Form',
+  discharge_summary: 'Discharge Summary',
+  prescription:      'Prescription',
 }
+
+// ── small shared UI pieces ────────────────────────────────────────────────────
 
 function RiskBadge({ level, score }: { level: RiskLevel; score: number }) {
   return (
@@ -35,47 +37,67 @@ function SeverityPip({ sev }: { sev: string }) {
 }
 
 function ConfidenceBar({ value }: { value: number }) {
-  const pct  = Math.round(value * 100)
-  const low  = value < 0.6
-  const mid  = value >= 0.6 && value < 0.85
+  const pct = Math.round(value * 100)
+  const cls = value < 0.6 ? 'conf-low' : value < 0.85 ? 'conf-mid' : 'conf-ok'
   return (
     <span className="cd-conf" title={`Confidence: ${pct}%`}>
-      <span
-        className={`cd-conf-bar ${low ? 'conf-low' : mid ? 'conf-mid' : 'conf-ok'}`}
-        style={{ width: `${pct}%` }}
-      />
-      <span className={`cd-conf-pct ${low ? 'conf-low-text' : ''}`}>{pct}%</span>
+      <span className={`cd-conf-bar ${cls}`} style={{ width: `${pct}%` }} />
+      <span className={`cd-conf-pct${value < 0.6 ? ' conf-low-text' : ''}`}>{pct}%</span>
     </span>
   )
 }
 
-// ─── document viewer (left pane) ─────────────────────────────────────────────
+// ── document viewer (left pane) ───────────────────────────────────────────────
 
 interface ViewerProps {
-  docs:       Document[]
-  activeDock: string          // doc id
-  activePage: number          // 1-based
-  onDocChange: (id: string) => void
+  claimId:     string
+  docs:        Document[]
+  activeDocId: number | null
+  activePage:  number          // 1-based
+  onDocChange:  (id: number) => void
   onPageChange: (page: number) => void
 }
 
-function DocumentViewer({ docs, activeDock, activePage, onDocChange, onPageChange }: ViewerProps) {
-  const doc = docs.find(d => d.id === activeDock) ?? docs[0]
-  if (!doc) return null
+function DocumentViewer({
+  claimId, docs, activeDocId, activePage, onDocChange, onPageChange,
+}: ViewerProps) {
+  const [imgError, setImgError] = useState(false)
 
-  const pageUrl  = doc.page_image_urls[activePage - 1] ?? null
-  const maxPage  = doc.page_count
+  // Reset error state whenever the image URL changes
+  const doc     = docs.find(d => d.id === activeDocId) ?? docs[0] ?? null
+  const maxPage = doc?.page_count ?? 1
+
+  // Clamp activePage within [1, maxPage] in case a doc switch leaves it out of range
+  const safePage = Math.min(Math.max(activePage, 1), maxPage)
+
+  const imgUrl = doc
+    ? getPageImageUrl(claimId, doc.id, safePage)
+    : null
+
+  // Reset error flag when the URL changes (different doc or page)
+  useEffect(() => { setImgError(false) }, [imgUrl])
+
+  if (docs.length === 0) {
+    return (
+      <div className="cd-viewer">
+        <div className="cd-page-placeholder">
+          <span>📂</span>
+          <span>No documents attached to this claim.</span>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="cd-viewer">
       {/* document tabs */}
-      <div className="cd-doc-tabs" role="tablist">
+      <div className="cd-doc-tabs" role="tablist" aria-label="Documents">
         {docs.map(d => (
           <button
             key={d.id}
             role="tab"
-            aria-selected={d.id === activeDock}
-            className={`cd-doc-tab${d.id === activeDock ? ' active' : ''}`}
+            aria-selected={d.id === (doc?.id ?? -1)}
+            className={`cd-doc-tab${d.id === (doc?.id ?? -1) ? ' active' : ''}`}
             onClick={() => { onDocChange(d.id); onPageChange(1) }}
             title={d.filename}
           >
@@ -84,15 +106,35 @@ function DocumentViewer({ docs, activeDock, activePage, onDocChange, onPageChang
         ))}
       </div>
 
+      {/* filename sub-label */}
+      {doc && (
+        <div className="cd-doc-filename" title={doc.filename}>
+          📄 {doc.filename}
+          <span className="cd-doc-pages">
+            {doc.page_count} page{doc.page_count !== 1 ? 's' : ''}
+          </span>
+        </div>
+      )}
+
       {/* page image */}
       <div className="cd-page-frame">
-        {pageUrl ? (
-          <img src={pageUrl} alt={`${doc.filename} page ${activePage}`} className="cd-page-img" />
+        {imgUrl && !imgError ? (
+          <img
+            key={imgUrl}                   /* remount on URL change so onError resets */
+            src={imgUrl}
+            alt={`${doc?.filename ?? 'document'} – page ${safePage}`}
+            className="cd-page-img"
+            onError={() => setImgError(true)}
+          />
         ) : (
           <div className="cd-page-placeholder">
-            <span>📄</span>
-            <span>{doc.filename}</span>
-            <span className="cd-page-placeholder-sub">No preview available</span>
+            <span>{imgError ? '⚠️' : '📄'}</span>
+            <span>{imgError ? 'Image not available' : (doc?.filename ?? '')}</span>
+            {imgError && (
+              <span className="cd-page-placeholder-sub">
+                Could not load page {safePage} from the server.
+              </span>
+            )}
           </div>
         )}
       </div>
@@ -101,19 +143,17 @@ function DocumentViewer({ docs, activeDock, activePage, onDocChange, onPageChang
       <div className="cd-pager">
         <button
           className="cd-pager-btn"
-          disabled={activePage <= 1}
-          onClick={() => onPageChange(activePage - 1)}
+          disabled={safePage <= 1}
+          onClick={() => onPageChange(safePage - 1)}
           aria-label="Previous page"
         >
           ← Prev
         </button>
-        <span className="cd-pager-info">
-          Page {activePage} of {maxPage}
-        </span>
+        <span className="cd-pager-info">Page {safePage} / {maxPage}</span>
         <button
           className="cd-pager-btn"
-          disabled={activePage >= maxPage}
-          onClick={() => onPageChange(activePage + 1)}
+          disabled={safePage >= maxPage}
+          onClick={() => onPageChange(safePage + 1)}
           aria-label="Next page"
         >
           Next →
@@ -123,34 +163,33 @@ function DocumentViewer({ docs, activeDock, activePage, onDocChange, onPageChang
   )
 }
 
-// ─── editable field row ───────────────────────────────────────────────────────
+// ── editable field row ────────────────────────────────────────────────────────
 
 interface FieldRowProps {
   field:        Field
-  docId:        string
+  docId:        number
   claimId:      string
   onJumpToPage: (page: number) => void
-  onSaved:      (fieldId: string, newVal: string) => void
+  onSaved:      (fieldId: number, newVal: string) => void
 }
 
 function FieldRow({ field, docId, claimId, onJumpToPage, onSaved }: FieldRowProps) {
-  const [editing,  setEditing]  = useState(false)
-  const [draft,    setDraft]    = useState(field.value)
-  const [saving,   setSaving]   = useState(false)
-  const [saveErr,  setSaveErr]  = useState<string | null>(null)
+  const [editing, setEditing] = useState(false)
+  const [draft,   setDraft]   = useState(field.value)
+  const [saving,  setSaving]  = useState(false)
+  const [saveErr, setSaveErr] = useState<string | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  function startEdit() { setDraft(field.value); setEditing(true) }
+  useEffect(() => { if (editing) inputRef.current?.focus() }, [editing])
 
-  useEffect(() => {
-    if (editing) inputRef.current?.focus()
-  }, [editing])
+  function startEdit() { setDraft(field.value); setEditing(true) }
 
   async function save() {
     if (draft === field.value) { setEditing(false); return }
     setSaving(true); setSaveErr(null)
     try {
-      await updateField(claimId, docId, field.id, draft)
+      // updateField expects fieldId as string; field.id is number
+      await updateField(claimId, String(docId), String(field.id), draft)
       onSaved(field.id, draft)
       setEditing(false)
     } catch (e) {
@@ -167,9 +206,16 @@ function FieldRow({ field, docId, claimId, onJumpToPage, onSaved }: FieldRowProp
     if (e.key === 'Escape') cancel()
   }
 
+  const isLowConf = field.confidence < 0.6
+
   return (
-    <tr className={`cd-field-row${field.confidence < 0.6 ? ' low-conf-row' : ''}`}>
-      <td className="cd-field-name">{field.name}</td>
+    <tr className={`cd-field-row${isLowConf ? ' low-conf-row' : ''}`}>
+      <td className="cd-field-name">
+        {field.name}
+        {isLowConf && (
+          <span className="cd-low-conf-flag" title="Low confidence – review carefully">⚠</span>
+        )}
+      </td>
       <td className="cd-field-val">
         {editing ? (
           <span className="cd-edit-wrap">
@@ -181,8 +227,8 @@ function FieldRow({ field, docId, claimId, onJumpToPage, onSaved }: FieldRowProp
               onKeyDown={onKeyDown}
               disabled={saving}
             />
-            <button className="cd-save-btn" onClick={save}  disabled={saving}>✓</button>
-            <button className="cd-cancel-btn" onClick={cancel} disabled={saving}>✕</button>
+            <button className="cd-save-btn"   onClick={save}   disabled={saving} aria-label="Save">✓</button>
+            <button className="cd-cancel-btn" onClick={cancel} disabled={saving} aria-label="Cancel">✕</button>
           </span>
         ) : (
           <span
@@ -193,8 +239,8 @@ function FieldRow({ field, docId, claimId, onJumpToPage, onSaved }: FieldRowProp
             tabIndex={0}
             onKeyDown={e => e.key === 'Enter' && startEdit()}
           >
-            {field.value}
-            <span className="cd-edit-hint">✎</span>
+            {field.value || <span className="cd-field-empty">—</span>}
+            <span className="cd-edit-hint" aria-hidden>✎</span>
           </span>
         )}
         {saveErr && <span className="cd-save-err"> {saveErr}</span>}
@@ -206,7 +252,7 @@ function FieldRow({ field, docId, claimId, onJumpToPage, onSaved }: FieldRowProp
         <button
           className="cd-jump-btn"
           onClick={() => onJumpToPage(field.page_number)}
-          title={`Go to page ${field.page_number}`}
+          title={`Jump to page ${field.page_number}`}
         >
           p.{field.page_number} ↗
         </button>
@@ -215,12 +261,12 @@ function FieldRow({ field, docId, claimId, onJumpToPage, onSaved }: FieldRowProp
   )
 }
 
-// ─── finding card ─────────────────────────────────────────────────────────────
+// ── finding card ──────────────────────────────────────────────────────────────
 
 interface FindingCardProps {
-  finding:      Finding
-  docs:         Document[]
-  onJumpToDoc:  (docId: string, page: number) => void
+  finding:     Finding
+  docs:        Document[]
+  onJumpToDoc: (docId: number, page: number) => void
 }
 
 function FindingCard({ finding, docs, onJumpToDoc }: FindingCardProps) {
@@ -237,19 +283,21 @@ function FindingCard({ finding, docs, onJumpToDoc }: FindingCardProps) {
         <span className="cd-finding-rule">{finding.rule_id}</span>
       </div>
 
-      {finding.evidence.length > 0 && (
+      {(finding.evidence ?? []).length > 0 && (
         <div className="cd-finding-evidence">
           <span className="cd-finding-label">Evidence</span>
-          {finding.evidence.map((ev, i) => (
-            <button
-              key={i}
-              className="cd-evidence-link"
-              onClick={() => jump(ev.document_filename, ev.page_number)}
-              title={`Open ${ev.document_filename} p.${ev.page_number}`}
-            >
-              📄 {ev.document_filename} · p.{ev.page_number}
-            </button>
-          ))}
+          <div className="cd-evidence-links">
+            {(finding.evidence ?? []).map((ev, i) => (
+              <button
+                key={i}
+                className="cd-evidence-link"
+                onClick={() => jump(ev.document_filename, ev.page_number)}
+                title={`Jump to ${ev.document_filename} p.${ev.page_number}`}
+              >
+                📄 {ev.document_filename} · p.{ev.page_number}
+              </button>
+            ))}
+          </div>
         </div>
       )}
 
@@ -268,9 +316,45 @@ function FindingCard({ finding, docs, onJumpToDoc }: FindingCardProps) {
   )
 }
 
-// ─── decision bar ─────────────────────────────────────────────────────────────
+// ── risk panel ────────────────────────────────────────────────────────────────
+
+function RiskPanel({
+  level, score, reasons,
+}: { level: RiskLevel; score: number; reasons: string[] }) {
+  return (
+    <div className="cd-risk-panel">
+      <div className="cd-risk-panel-top">
+        <RiskBadge level={level} score={score} />
+        <div className="cd-risk-score-bar-wrap" title={`Risk score: ${score}/100`}>
+          <div
+            className={`cd-risk-score-bar cd-risk-score-bar-${level.toLowerCase()}`}
+            style={{ width: `${score}%` }}
+          />
+        </div>
+        <span className="cd-risk-score-label">{score} / 100</span>
+      </div>
+
+      {(reasons ?? []).length > 0 && (
+        <div className="cd-risk-reasons">
+          <span className="cd-risk-reasons-label">Risk indicators</span>
+          <ul className="cd-risk-reasons-list">
+            {(reasons ?? []).map((r, i) => <li key={i}>{r}</li>)}
+          </ul>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── decision bar ──────────────────────────────────────────────────────────────
 
 type Decision = 'approved' | 'queried' | 'escalated'
+
+const DECISIONS: { key: Decision; label: string; cls: string }[] = [
+  { key: 'approved',  label: '✓ Approve',  cls: 'dec-approve'  },
+  { key: 'queried',   label: '? Query',    cls: 'dec-query'    },
+  { key: 'escalated', label: '↑ Escalate', cls: 'dec-escalate' },
+]
 
 interface DecisionBarProps {
   claimId:   string
@@ -279,15 +363,13 @@ interface DecisionBarProps {
 }
 
 function DecisionBar({ claimId, status, onDecided }: DecisionBarProps) {
-  const [pending,  setPending]  = useState<Decision | null>(null)
-  const [comment,  setComment]  = useState('')
-  const [saving,   setSaving]   = useState(false)
-  const [err,      setErr]      = useState<string | null>(null)
+  const [pending, setPending] = useState<Decision | null>(null)
+  const [comment, setComment] = useState('')
+  const [saving,  setSaving]  = useState(false)
+  const [err,     setErr]     = useState<string | null>(null)
   const textRef = useRef<HTMLTextAreaElement>(null)
 
-  useEffect(() => {
-    if (pending) textRef.current?.focus()
-  }, [pending])
+  useEffect(() => { if (pending) textRef.current?.focus() }, [pending])
 
   async function confirm() {
     if (!pending) return
@@ -305,12 +387,6 @@ function DecisionBar({ claimId, status, onDecided }: DecisionBarProps) {
 
   function cancel() { setPending(null); setComment(''); setErr(null) }
 
-  const DECISIONS: { key: Decision; label: string; cls: string }[] = [
-    { key: 'approved',  label: 'Approve',  cls: 'dec-approve'  },
-    { key: 'queried',   label: 'Query',    cls: 'dec-query'    },
-    { key: 'escalated', label: 'Escalate', cls: 'dec-escalate' },
-  ]
-
   return (
     <div className="cd-decision-bar">
       <div className="cd-decision-current">
@@ -318,13 +394,14 @@ function DecisionBar({ claimId, status, onDecided }: DecisionBarProps) {
         <StatusChip status={status} />
       </div>
 
-      <div className="cd-decision-btns">
+      <div className="cd-decision-btns" role="group" aria-label="Adjudication actions">
         {DECISIONS.map(d => (
           <button
             key={d.key}
             className={`cd-dec-btn ${d.cls}${status === d.key ? ' is-current' : ''}`}
             onClick={() => { setPending(d.key); setErr(null) }}
             disabled={saving}
+            aria-pressed={status === d.key}
           >
             {d.label}
           </button>
@@ -332,7 +409,7 @@ function DecisionBar({ claimId, status, onDecided }: DecisionBarProps) {
       </div>
 
       {pending && (
-        <div className="cd-confirm-panel">
+        <div className="cd-confirm-panel" role="region" aria-label="Confirm decision">
           <p className="cd-confirm-title">
             Set status to <strong>{pending}</strong> — add a comment (optional):
           </p>
@@ -345,10 +422,13 @@ function DecisionBar({ claimId, status, onDecided }: DecisionBarProps) {
             onChange={e => setComment(e.target.value)}
             disabled={saving}
           />
-          {err && <p className="cd-confirm-err">{err}</p>}
+          {err && <p className="cd-confirm-err" role="alert">{err}</p>}
           <div className="cd-confirm-actions">
-            <button className={`cd-dec-btn ${DECISIONS.find(d=>d.key===pending)!.cls}`}
-              onClick={confirm} disabled={saving}>
+            <button
+              className={`cd-dec-btn ${DECISIONS.find(d => d.key === pending)!.cls}`}
+              onClick={confirm}
+              disabled={saving}
+            >
               {saving ? 'Saving…' : `Confirm ${pending}`}
             </button>
             <button className="cd-cancel-decision" onClick={cancel} disabled={saving}>
@@ -361,7 +441,54 @@ function DecisionBar({ claimId, status, onDecided }: DecisionBarProps) {
   )
 }
 
-// ─── main page ────────────────────────────────────────────────────────────────
+// ── ErrorBoundary (class component — hooks can't catch render errors) ─────────
+
+interface EBState { error: Error | null }
+
+export class ErrorBoundary extends Component<
+  { children: React.ReactNode; fallback?: React.ReactNode },
+  EBState
+> {
+  state: EBState = { error: null }
+
+  static getDerivedStateFromError(error: Error): EBState {
+    return { error }
+  }
+
+  render() {
+    if (this.state.error) {
+      return this.props.fallback ?? (
+        <div style={{
+          padding: '2rem', maxWidth: 600, margin: '3rem auto',
+          fontFamily: 'Inter, system-ui, sans-serif',
+        }}>
+          <h2 style={{ color: '#dc2626', marginBottom: '0.75rem' }}>Something went wrong</h2>
+          <pre style={{
+            background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 8,
+            padding: '1rem', fontSize: '0.85rem', overflowX: 'auto',
+            whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: '#7f1d1d',
+          }}>
+            {this.state.error.message}
+            {this.state.error.stack ? '\n\n' + this.state.error.stack : ''}
+          </pre>
+          <button
+            onClick={() => this.setState({ error: null })}
+            style={{
+              marginTop: '1rem', padding: '0.5rem 1.2rem',
+              background: '#1a56db', color: '#fff', border: 'none',
+              borderRadius: 7, cursor: 'pointer', fontSize: '0.9rem', fontWeight: 700,
+            }}
+          >
+            Try again
+          </button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
+// ── main page ─────────────────────────────────────────────────────────────────
 
 export default function ClaimDetailPage() {
   const { id }   = useParams<{ id: string }>()
@@ -371,8 +498,8 @@ export default function ClaimDetailPage() {
   const [loading, setLoading] = useState(true)
   const [error,   setError]   = useState<string | null>(null)
 
-  // viewer state
-  const [activeDocId, setActiveDocId] = useState<string>('')
+  // viewer state — doc id is number (DB PK), null until claim loads
+  const [activeDocId, setActiveDocId] = useState<number | null>(null)
   const [activePage,  setActivePage]  = useState(1)
 
   useEffect(() => {
@@ -380,26 +507,27 @@ export default function ClaimDetailPage() {
     getClaim(id)
       .then(c => {
         setClaim(c)
-        if (c.documents[0]) setActiveDocId(c.documents[0].id)
+        const firstDoc = (c.documents ?? [])[0]
+        if (firstDoc) setActiveDocId(firstDoc.id)
       })
       .catch(e => setError(String(e)))
       .finally(() => setLoading(false))
   }, [id])
 
-  function jumpToDoc(docId: string, page: number) {
+  function jumpToDoc(docId: number, page: number) {
     setActiveDocId(docId)
     setActivePage(page)
   }
 
-  function handleFieldSaved(docId: string, fieldId: string, newVal: string) {
+  function handleFieldSaved(docId: number, fieldId: number, newVal: string) {
     setClaim(prev => {
       if (!prev) return prev
       return {
         ...prev,
-        documents: prev.documents.map(d =>
+        documents: (prev.documents ?? []).map(d =>
           d.id !== docId ? d : {
             ...d,
-            fields: d.fields.map(f =>
+            fields: (d.fields ?? []).map(f =>
               f.id !== fieldId ? f : { ...f, value: newVal }
             ),
           }
@@ -408,7 +536,7 @@ export default function ClaimDetailPage() {
     })
   }
 
-  // ── loading / error states ─────────────────────────────────────────────────
+  // ── loading / error ────────────────────────────────────────────────────────
   if (loading) return (
     <div className="cd-shell">
       <div className="cd-loading"><span className="cd-spinner" /> Loading claim…</div>
@@ -421,12 +549,14 @@ export default function ClaimDetailPage() {
     </div>
   )
 
-  const activeDoc = claim.documents.find(d => d.id === activeDocId) ?? claim.documents[0]
+  const docs     = claim.documents ?? []
+  const findings = claim.findings  ?? []
+  const activeDoc = docs.find(d => d.id === activeDocId) ?? docs[0] ?? null
 
   return (
     <div className="cd-shell">
 
-      {/* ── breadcrumb + header ──────────────────────────────────────────── */}
+      {/* ── slim header ─────────────────────────────────────────────────── */}
       <div className="cd-header">
         <button className="cd-back" onClick={() => navigate(-1)}>← Queue</button>
 
@@ -442,47 +572,53 @@ export default function ClaimDetailPage() {
             <StatusChip status={claim.status} />
           </div>
         </div>
-
-        {/* risk indicators */}
-        {claim.risk_reasons.length > 0 && (
-          <div className="cd-risk-indicators">
-            <span className="cd-risk-ind-label">Risk indicators</span>
-            <ul className="cd-risk-ind-list">
-              {claim.risk_reasons.map((r, i) => (
-                <li key={i}>{r}</li>
-              ))}
-            </ul>
-          </div>
-        )}
       </div>
 
-      {/* ── split layout ────────────────────────────────────────────────── */}
+      {/* ── split body ──────────────────────────────────────────────────── */}
       <div className="cd-body">
 
-        {/* LEFT – document viewer */}
-        <aside className="cd-left">
+        {/* LEFT – sticky document viewer */}
+        <aside className="cd-left" aria-label="Document viewer">
           <DocumentViewer
-            docs={claim.documents}
-            activeDock={activeDocId}
+            claimId={claim.id}
+            docs={docs}
+            activeDocId={activeDocId}
             activePage={activePage}
             onDocChange={docId => { setActiveDocId(docId); setActivePage(1) }}
             onPageChange={setActivePage}
           />
         </aside>
 
-        {/* RIGHT – fields + findings + decision */}
-        <section className="cd-right">
+        {/* RIGHT – scrollable detail panel */}
+        <section className="cd-right" aria-label="Claim detail">
 
-          {/* ── 1. Extracted fields ───────────────────────────────────── */}
+          {/* ── Risk ─────────────────────────────────────────────────── */}
           <div className="cd-section">
-            <h3 className="cd-section-title">Extracted Fields</h3>
+            <h3 className="cd-section-title">Risk Assessment</h3>
+            <RiskPanel
+              level={claim.risk_level}
+              score={claim.risk_score}
+              reasons={claim.risk_reasons ?? []}
+            />
+          </div>
+
+          {/* ── Extracted fields ──────────────────────────────────────── */}
+          <div className="cd-section">
+            <h3 className="cd-section-title">
+              Extracted Fields
+              {activeDoc && (
+                <span className="cd-section-doc-hint">
+                  — {DOC_TYPE_LABEL[activeDoc.document_type] ?? activeDoc.filename}
+                </span>
+              )}
+            </h3>
             <p className="cd-section-hint">
-              Showing fields for{' '}
-              <strong>{DOC_TYPE_LABEL[activeDoc?.document_type] ?? activeDoc?.filename}</strong>.
-              Switch documents with the tabs on the left.
+              Switch documents with the tabs on the left. Click any value to correct it.
             </p>
 
-            {activeDoc?.fields.length === 0 ? (
+            {docs.length === 0 ? (
+              <p className="cd-empty">No documents on this claim.</p>
+            ) : !activeDoc || (activeDoc.fields ?? []).length === 0 ? (
               <p className="cd-empty">No fields extracted for this document.</p>
             ) : (
               <div className="cd-fields-table-wrap">
@@ -496,7 +632,7 @@ export default function ClaimDetailPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {activeDoc?.fields.map(field => (
+                    {(activeDoc.fields ?? []).map(field => (
                       <FieldRow
                         key={field.id}
                         field={field}
@@ -512,24 +648,24 @@ export default function ClaimDetailPage() {
             )}
           </div>
 
-          {/* ── 2. Findings ───────────────────────────────────────────── */}
+          {/* ── Findings ─────────────────────────────────────────────── */}
           <div className="cd-section">
             <h3 className="cd-section-title">
               Findings
-              {claim.findings.length > 0 && (
-                <span className="cd-findings-count">{claim.findings.length}</span>
+              {findings.length > 0 && (
+                <span className="cd-findings-count">{findings.length}</span>
               )}
             </h3>
 
-            {claim.findings.length === 0 ? (
+            {findings.length === 0 ? (
               <p className="cd-empty cd-empty-green">✓ No findings flagged for this claim.</p>
             ) : (
               <div className="cd-findings-list">
-                {claim.findings.map(f => (
+                {findings.map(f => (
                   <FindingCard
                     key={f.id}
                     finding={f}
-                    docs={claim.documents}
+                    docs={docs}
                     onJumpToDoc={jumpToDoc}
                   />
                 ))}
@@ -537,8 +673,8 @@ export default function ClaimDetailPage() {
             )}
           </div>
 
-          {/* ── 3. Decision ───────────────────────────────────────────── */}
-          <div className="cd-section">
+          {/* ── Decision ─────────────────────────────────────────────── */}
+          <div className="cd-section cd-section-last">
             <h3 className="cd-section-title">Decision</h3>
             <DecisionBar
               claimId={claim.id}

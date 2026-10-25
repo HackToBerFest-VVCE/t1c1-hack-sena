@@ -6,8 +6,31 @@ import './DashboardPage.css'
 
 // ── static option lists ───────────────────────────────────────────────────────
 
-const RISK_LEVELS: RiskLevel[]    = ['High', 'Medium', 'Low']
-const STATUSES:    ClaimStatus[]  = ['pending', 'queried', 'escalated', 'approved']
+const RISK_LEVELS: RiskLevel[]   = ['High', 'Medium', 'Low']
+const STATUSES:    ClaimStatus[] = ['pending', 'queried', 'escalated', 'approved']
+
+// ── sort config ───────────────────────────────────────────────────────────────
+
+type SortKey = 'risk_score' | 'patient_name' | 'hospital_name' | 'status' | 'created_at'
+type SortDir = 'asc' | 'desc'
+
+const RISK_ORDER: Record<RiskLevel, number> = { High: 3, Medium: 2, Low: 1 }
+
+function sortClaims(claims: Claim[], key: SortKey, dir: SortDir): Claim[] {
+  const sorted = [...claims].sort((a, b) => {
+    let cmp = 0
+    if (key === 'risk_score') {
+      // sort by risk_score, but also secondary-sort by risk_level ordinal
+      cmp = (b.risk_score - a.risk_score) || (RISK_ORDER[b.risk_level] - RISK_ORDER[a.risk_level])
+    } else if (key === 'patient_name' || key === 'hospital_name' || key === 'status') {
+      cmp = a[key].localeCompare(b[key])
+    } else if (key === 'created_at') {
+      cmp = a.created_at.localeCompare(b.created_at)
+    }
+    return dir === 'asc' ? cmp : -cmp
+  })
+  return sorted
+}
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -49,6 +72,31 @@ function StatusChip({ status }: { status: ClaimStatus }) {
   )
 }
 
+interface ThProps {
+  label:     string
+  sortKey:   SortKey
+  active:    SortKey
+  dir:       SortDir
+  onSort:    (key: SortKey) => void
+  className?: string
+}
+
+function Th({ label, sortKey, active, dir, onSort, className }: ThProps) {
+  const isActive = active === sortKey
+  return (
+    <th
+      className={`sortable-th${isActive ? ' th-active' : ''}${className ? ` ${className}` : ''}`}
+      onClick={() => onSort(sortKey)}
+      aria-sort={isActive ? (dir === 'asc' ? 'ascending' : 'descending') : 'none'}
+    >
+      {label}
+      <span className="sort-icon" aria-hidden>
+        {isActive ? (dir === 'asc' ? ' ▲' : ' ▼') : ' ⇅'}
+      </span>
+    </th>
+  )
+}
+
 // ── main component ────────────────────────────────────────────────────────────
 
 export default function DashboardPage() {
@@ -59,9 +107,13 @@ export default function DashboardPage() {
   const [error,   setError]   = useState<string | null>(null)
 
   // filter state
-  const [search,    setSearch]    = useState('')
-  const [riskFilter, setRiskFilter] = useState<RiskLevel | ''>('')
+  const [search,       setSearch]       = useState('')
+  const [riskFilter,   setRiskFilter]   = useState<RiskLevel | ''>('')
   const [statusFilter, setStatusFilter] = useState<ClaimStatus | ''>('')
+
+  // sort state — default: risk_score descending
+  const [sortKey, setSortKey] = useState<SortKey>('risk_score')
+  const [sortDir, setSortDir] = useState<SortDir>('desc')
 
   useEffect(() => {
     getClaims()
@@ -70,22 +122,31 @@ export default function DashboardPage() {
       .finally(() => setLoading(false))
   }, [])
 
-  // sort by risk_score desc, then apply filters
+  function handleSort(key: SortKey) {
+    if (key === sortKey) {
+      setSortDir(d => d === 'asc' ? 'desc' : 'asc')
+    } else {
+      setSortKey(key)
+      // risk_score always starts desc; others start asc
+      setSortDir(key === 'risk_score' ? 'desc' : 'asc')
+    }
+  }
+
+  // sort, then filter
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
-    return [...claims]
-      .sort((a, b) => b.risk_score - a.risk_score)
+    return sortClaims(claims, sortKey, sortDir)
       .filter(c => !riskFilter   || c.risk_level === riskFilter)
       .filter(c => !statusFilter || c.status     === statusFilter)
       .filter(c => {
         if (!q) return true
         return (
-          c.id.toLowerCase().includes(q)           ||
-          c.patient_name.toLowerCase().includes(q) ||
+          c.id.toLowerCase().includes(q)            ||
+          c.patient_name.toLowerCase().includes(q)  ||
           c.hospital_name.toLowerCase().includes(q)
         )
       })
-  }, [claims, search, riskFilter, statusFilter])
+  }, [claims, sortKey, sortDir, search, riskFilter, statusFilter])
 
   // ── summary counts ─────────────────────────────────────────────────────────
   const counts = useMemo(() => ({
@@ -103,6 +164,8 @@ export default function DashboardPage() {
 
   const hasFilters = search || riskFilter || statusFilter
 
+  const thProps = { active: sortKey, dir: sortDir, onSort: handleSort }
+
   // ── render ─────────────────────────────────────────────────────────────────
   return (
     <div className="queue-page">
@@ -111,10 +174,10 @@ export default function DashboardPage() {
       <div className="queue-top">
         <h2 className="queue-title">Claims Queue</h2>
         <div className="summary-cards">
-          <SummaryCard label="Total"     value={counts.total}     />
-          <SummaryCard label="High Risk" value={counts.high}     accent="red"   />
-          <SummaryCard label="Pending"   value={counts.pending}  accent="amber" />
-          <SummaryCard label="Escalated" value={counts.escalated} accent="blue" />
+          <SummaryCard label="Total"     value={counts.total}                  />
+          <SummaryCard label="High Risk" value={counts.high}      accent="red"   />
+          <SummaryCard label="Pending"   value={counts.pending}   accent="amber" />
+          <SummaryCard label="Escalated" value={counts.escalated} accent="blue"  />
         </div>
       </div>
 
@@ -183,13 +246,13 @@ export default function DashboardPage() {
             <table className="claims-table">
               <thead>
                 <tr>
-                  <th>Claim ID</th>
-                  <th>Patient</th>
-                  <th>Hospital</th>
-                  <th>Risk</th>
-                  <th>Top Reason</th>
-                  <th>Status</th>
-                  <th>Date</th>
+                  <th className="col-id">Claim ID</th>
+                  <Th label="Patient"  sortKey="patient_name"  {...thProps} className="col-patient"  />
+                  <Th label="Hospital" sortKey="hospital_name" {...thProps} className="col-hospital" />
+                  <Th label="Risk"     sortKey="risk_score"    {...thProps} className="col-risk"     />
+                  <th className="col-reason">Top Reason</th>
+                  <Th label="Status"   sortKey="status"        {...thProps} className="col-status"   />
+                  <Th label="Date"     sortKey="created_at"    {...thProps} className="col-date"     />
                 </tr>
               </thead>
               <tbody>

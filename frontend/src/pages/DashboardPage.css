@@ -219,6 +219,34 @@
   text-align: left;
   border-bottom: 2px solid var(--border);
   white-space: nowrap;
+  user-select: none;
+}
+
+/* sortable column headers */
+.sortable-th {
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.sortable-th:hover {
+  background: #d0e1fd;
+  color: var(--blue);
+}
+
+.sortable-th.th-active {
+  background: #c3d6fa;
+  color: var(--blue);
+}
+
+.sort-icon {
+  font-size: 0.7rem;
+  opacity: 0.55;
+  margin-left: 1px;
+}
+
+.sortable-th:hover   .sort-icon,
+.sortable-th.th-active .sort-icon {
+  opacity: 1;
 }
 
 .claim-row {
