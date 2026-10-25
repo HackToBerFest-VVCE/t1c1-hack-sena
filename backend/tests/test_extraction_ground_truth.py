@@ -281,3 +281,6 @@ class TestV5SignatureNaming:
             f"V5 findings: {[f['what'] for f in findings]}"
         )
         assert sig_findings[0]["rule_id"] == "V5-MISSING-REQUIRED-FIELDS"
+        assert sig_findings[0]["weight"] == 30, (
+            f"Signature V5 finding should have weight=30, got {sig_findings[0]['weight']}"
+        )

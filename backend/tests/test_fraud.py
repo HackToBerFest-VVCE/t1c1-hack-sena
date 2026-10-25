@@ -62,6 +62,8 @@ def _prior(
     admission="08-Nov-2024",
     total="Rs. 98,450.50",
     file_hash=None,
+    bill_number="APB/2024/007821",
+    billed_total="Rs. 98,450.50",
 ) -> PriorClaim:
     return PriorClaim(
         claim_id=claim_id,
@@ -70,6 +72,8 @@ def _prior(
         admission_date=admission,
         total_amount=total,
         file_hash=file_hash,
+        bill_number=bill_number,
+        billed_total=billed_total,
     )
 
 
@@ -378,9 +382,9 @@ class TestF5:
 # ── compute_risk ──────────────────────────────────────────────────────────────
 
 class TestComputeRisk:
-    def _finding(self, weight, what="test finding"):
+    def _finding(self, weight, what="test finding", severity="low", rule_id="TEST"):
         return {
-            "rule_id": "TEST", "severity": "low", "weight": weight,
+            "rule_id": rule_id, "severity": severity, "weight": weight,
             "what": what, "evidence": [], "why_it_matters": "",
             "suggested_action": "",
         }
@@ -422,17 +426,76 @@ class TestComputeRisk:
         assert r["risk_reasons"] == ["first reason", "second reason"]
 
     def test_f1_plus_f2_equals_high(self):
-        # F1 weight=40 + F2 weight=40 = 80 → High
-        f1 = self._finding(40, "F1 finding")
-        f2 = self._finding(40, "F2 finding")
+        # F1 weight=40 + F2 weight=40 = 80 → High (by score AND duplicate floor)
+        f1 = self._finding(40, "F1 finding", rule_id="F1-NEAR-DUPLICATE-CLAIM")
+        f2 = self._finding(40, "F2 finding", rule_id="F2-DUPLICATE-FILE-HASH")
         r  = compute_risk([f1, f2])
         assert r["risk_level"] == "High"
         assert r["risk_score"]  == 80
 
     def test_f3_plus_f4_plus_f5_is_medium(self):
-        # F3=10 + F4=15 + F5=10 = 35 → Medium
+        # F3=10 + F4=15 + F5=10 = 35 → Medium by score; no floor applies (low/medium sev, no F1/F2)
         r = compute_risk([self._finding(10), self._finding(15), self._finding(10)])
         assert r["risk_level"] == "Medium"
+
+    # ── severity-floor tests ───────────────────────────────────────────────
+
+    def test_high_severity_finding_floors_to_medium(self):
+        # Score 20 (< 30 → Low by score alone), but one finding is severity=high → Medium
+        findings = [
+            self._finding(10, severity="low"),
+            self._finding(10, severity="high"),
+        ]
+        r = compute_risk(findings)
+        assert r["risk_score"] == 20
+        assert r["risk_level"] == "Medium", (
+            "A high-severity finding should floor the level to at least Medium"
+        )
+
+    def test_high_severity_does_not_downgrade_from_high(self):
+        # Score 80 → High; high-severity floor should not change it
+        findings = [
+            self._finding(40, severity="high"),
+            self._finding(40, severity="high"),
+        ]
+        r = compute_risk(findings)
+        assert r["risk_score"]  == 80
+        assert r["risk_level"]  == "High"
+
+    def test_duplicate_f1_finding_always_gives_high(self):
+        # Score 10 (well below Medium) but F1 rule → floor to High
+        f1 = self._finding(10, "near-duplicate", severity="high",
+                           rule_id="F1-NEAR-DUPLICATE-CLAIM")
+        r = compute_risk([f1])
+        assert r["risk_level"] == "High", (
+            "An F1 duplicate finding should force the level to High regardless of score"
+        )
+
+    def test_duplicate_f2_finding_always_gives_high(self):
+        # Score 15 → Low by score, but F2 rule → High
+        f2 = self._finding(15, "hash match", severity="high",
+                           rule_id="F2-DUPLICATE-FILE-HASH")
+        r = compute_risk([f2])
+        assert r["risk_level"] == "High", (
+            "An F2 duplicate finding should force the level to High regardless of score"
+        )
+
+    def test_no_floor_when_only_low_medium_severity_non_duplicate(self):
+        # Low score, no high severity, no F1/F2 → stays Low
+        findings = [
+            self._finding(5,  severity="low"),
+            self._finding(10, severity="medium"),
+        ]
+        r = compute_risk(findings)
+        assert r["risk_score"] == 15
+        assert r["risk_level"] == "Low"
+
+    def test_high_severity_floor_stops_at_medium_not_high(self):
+        # Score 25 → Low; one high-severity finding → Medium, NOT High
+        f = self._finding(25, severity="high", rule_id="V6-DATE-OUTSIDE")
+        r = compute_risk([f])
+        assert r["risk_score"] == 25
+        assert r["risk_level"] == "Medium"   # floor raises Low→Medium but not to High
 
 
 # ── run_fraud_rules integration ───────────────────────────────────────────────

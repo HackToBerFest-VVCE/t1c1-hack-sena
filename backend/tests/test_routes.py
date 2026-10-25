@@ -348,3 +348,138 @@ class TestAudit:
         assert hasattr(entry, "action")
         assert hasattr(entry, "claim_id")
         assert hasattr(entry, "timestamp")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Duplicate detection (F1 / F2b) – bundle_001 then bundle_008
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _create_bundle(bundle_name: str, db_session) -> dict:
+    """Upload all three PDFs of a bundle as a single claim."""
+    import asyncio
+    from main import ClaimDetail
+
+    bundle_dir = SAMPLE_DIR / bundle_name
+    doc_files  = ["claim_form.pdf", "hospital_bill.pdf", "discharge_summary.pdf"]
+    uploads    = [
+        _make_upload(bundle_dir / f)
+        for f in doc_files
+        if (bundle_dir / f).exists()
+    ]
+    if not uploads:
+        pytest.skip(f"Bundle {bundle_name} not found")
+
+    coro   = create_claim(files=uploads, x_user="test_user", db=db_session)
+    result = asyncio.get_event_loop().run_until_complete(coro)
+    return ClaimDetail.model_validate(result).model_dump()
+
+
+class TestDuplicateDetection:
+    """
+    Bundle_008 is an exact submission of bundle_001 (same patient, hospital,
+    bill number, dates, amounts — different file bytes).  After uploading
+    bundle_001 first, uploading bundle_008 must trigger at least one of:
+      - F1-NEAR-DUPLICATE-CLAIM  (patient + hospital + date/amount/bill match)
+      - F2B-DUPLICATE-BILL-NUMBER  (same bill number at same hospital)
+
+    The finding must:
+      - name the first claim's ID
+      - contain the phrase "risk indicator" (never "fraud confirmed")
+    """
+
+    _B001 = SAMPLE_DIR / "bundle_001"
+    _B008 = SAMPLE_DIR / "bundle_008"
+
+    @pytest.fixture(autouse=True)
+    def _check_bundles(self):
+        if not self._B001.exists() or not self._B008.exists():
+            pytest.skip("bundle_001 or bundle_008 not found")
+
+    def test_duplicate_finding_fires_for_bundle_008(self, db):
+        # Upload bundle_001 first
+        claim_001 = _create_bundle("bundle_001", db)
+        claim_001_id = claim_001["id"]
+
+        # Upload bundle_008 second
+        claim_008 = _create_bundle("bundle_008", db)
+
+        # Collect all duplicate-related findings on the second claim
+        dup_rule_ids = {"F1-NEAR-DUPLICATE-CLAIM", "F2B-DUPLICATE-BILL-NUMBER"}
+        dup_findings = [
+            f for f in claim_008["findings"]
+            if f["rule_id"] in dup_rule_ids
+        ]
+
+        assert len(dup_findings) >= 1, (
+            f"Expected at least one duplicate finding (F1 or F2b) on the "
+            f"second claim, but got none.  All findings: "
+            f"{[f['rule_id'] for f in claim_008['findings']]}"
+        )
+
+    def test_duplicate_finding_names_prior_claim_id(self, db):
+        claim_001 = _create_bundle("bundle_001", db)
+        claim_001_id = claim_001["id"]
+        claim_008 = _create_bundle("bundle_008", db)
+
+        dup_rule_ids = {"F1-NEAR-DUPLICATE-CLAIM", "F2B-DUPLICATE-BILL-NUMBER"}
+        dup_findings = [
+            f for f in claim_008["findings"]
+            if f["rule_id"] in dup_rule_ids
+        ]
+
+        assert len(dup_findings) >= 1, "No duplicate finding — prerequisite failed"
+        # At least one finding must mention the prior claim id
+        assert any(
+            claim_001_id in f["what"]
+            for f in dup_findings
+        ), (
+            f"Expected the prior claim id {claim_001_id!r} to appear in the "
+            f"finding 'what' field.  Got: {[f['what'] for f in dup_findings]}"
+        )
+
+    def test_duplicate_finding_says_risk_indicator_not_fraud_confirmed(self, db):
+        _create_bundle("bundle_001", db)
+        claim_008 = _create_bundle("bundle_008", db)
+
+        dup_rule_ids = {"F1-NEAR-DUPLICATE-CLAIM", "F2B-DUPLICATE-BILL-NUMBER"}
+        dup_findings = [
+            f for f in claim_008["findings"]
+            if f["rule_id"] in dup_rule_ids
+        ]
+
+        assert len(dup_findings) >= 1, "No duplicate finding — prerequisite failed"
+        for f in dup_findings:
+            assert "risk indicator" in f["what"].lower(), (
+                f"Finding 'what' must contain 'risk indicator': {f['what']!r}"
+            )
+            assert "fraud confirmed" not in f["what"].lower(), (
+                f"Finding must not say 'fraud confirmed': {f['what']!r}"
+            )
+
+    def test_bundle_001_alone_has_no_duplicate_findings(self, db):
+        """First upload should never produce a self-referencing duplicate."""
+        claim_001 = _create_bundle("bundle_001", db)
+        dup_rule_ids = {"F1-NEAR-DUPLICATE-CLAIM", "F2B-DUPLICATE-BILL-NUMBER"}
+        dup_findings = [
+            f for f in claim_001["findings"]
+            if f["rule_id"] in dup_rule_ids
+        ]
+        assert dup_findings == [], (
+            f"First upload of bundle_001 should not have duplicate findings: "
+            f"{dup_findings}"
+        )
+
+    def test_second_claim_risk_level_is_high(self, db):
+        """Duplicate findings carry weight 40 each; score must be ≥ 40 → High."""
+        _create_bundle("bundle_001", db)
+        claim_008 = _create_bundle("bundle_008", db)
+
+        dup_rule_ids = {"F1-NEAR-DUPLICATE-CLAIM", "F2B-DUPLICATE-BILL-NUMBER"}
+        has_dup = any(f["rule_id"] in dup_rule_ids for f in claim_008["findings"])
+        if not has_dup:
+            pytest.skip("No duplicate finding — prerequisite failed")
+
+        assert claim_008["risk_level"] == "High", (
+            f"Expected High risk for a duplicate submission, got "
+            f"{claim_008['risk_level']} (score={claim_008['risk_score']})"
+        )

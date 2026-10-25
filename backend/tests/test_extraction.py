@@ -294,8 +294,13 @@ class TestV5Signature:
             "Expected at least one V5 finding mentioning 'Claimant Signature' "
             f"for bundle_004. Findings: {findings}"
         )
+        sig_f = sig_findings[0]
+        # Signature finding uses the higher weight (30)
+        assert sig_f["weight"] == 30, (
+            f"Expected signature V5 finding weight=30, got {sig_f['weight']}"
+        )
         # Evidence must reference the claim form
-        ev = sig_findings[0]["evidence"]
+        ev = sig_f["evidence"]
         assert any("claim_form" in e["document"] for e in ev), (
             f"V5 finding evidence should reference claim_form.pdf, got: {ev}"
         )

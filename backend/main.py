@@ -205,11 +205,13 @@ def _recompute_risk(claim: Claim, db: Session) -> None:
     prior_claims: list[PriorClaim] = [
         PriorClaim(
             claim_id=c.id,
-            patient_name=c.patient_name,
-            hospital_name=c.hospital_name,
-            admission_date="",
-            total_amount="",
+            patient_name=c.patient_name or "",
+            hospital_name=c.hospital_name or "",
+            admission_date=c.admission_date or "",
+            total_amount=c.billed_total or "",
             file_hash=c.file_hash or "",
+            bill_number=c.bill_number or "",
+            billed_total=c.billed_total or "",
         )
         for c in prior_rows
     ]
@@ -217,11 +219,23 @@ def _recompute_risk(claim: Claim, db: Session) -> None:
         str(UPLOADS_DIR / d.filename) for d in claim.documents
     ]
     file_hashes = [_sha256(Path(p)) if Path(p).exists() else "" for p in file_paths]
+
+    # Extract policy_start_date from the current claim's doc_results
+    policy_start_date: str | None = None
+    for dr in doc_results:
+        for f in dr["fields"]:
+            if f["name"] == "policy_start_date" and f["value"]:
+                policy_start_date = f["value"]
+                break
+        if policy_start_date:
+            break
+
     fraud_findings = run_fraud_rules(
         doc_results,
         prior_claims=prior_claims,
         file_hashes=file_hashes,
         file_paths=file_paths,
+        policy_start_date=policy_start_date,
     )
 
     all_findings = val_findings + fraud_findings
@@ -331,6 +345,10 @@ async def create_claim(
 
     patient_name  = _first_val("patient_name")
     hospital_name = _first_val("hospital_name")
+    admission_date = _first_val("admission_date")
+    discharge_date = _first_val("discharge_date")
+    bill_number    = _first_val("bill_number")
+    billed_total   = _first_val("total_amount")
     primary_hash  = _sha256(saved_paths[0]) if saved_paths else None
 
     # ── 3. create Claim row ──────────────────────────────────────────────────
@@ -338,6 +356,10 @@ async def create_claim(
         id=claim_id,
         patient_name=patient_name,
         hospital_name=hospital_name,
+        admission_date=admission_date or None,
+        discharge_date=discharge_date or None,
+        bill_number=bill_number or None,
+        billed_total=billed_total or None,
         status=ClaimStatus.pending,
         risk_level=RiskLevel.Low,
         risk_score=0,

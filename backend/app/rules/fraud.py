@@ -42,13 +42,15 @@ from app.rules.validation import Evidence, Finding, DocResult
 # ── additional input types ────────────────────────────────────────────────────
 
 class PriorClaim(TypedDict):
-    """Minimal summary of a previously processed claim used for F1 / F2."""
-    claim_id:     str
-    patient_name: str
+    """Minimal summary of a previously processed claim used for F1 / F2 / F2b."""
+    claim_id:      str
+    patient_name:  str
     hospital_name: str
-    admission_date: str       # raw string as extracted
+    admission_date: str       # raw string as extracted, e.g. "08-Nov-2024"
     total_amount:  str        # raw string e.g. "Rs. 98,450.50"
     file_hash:     str | None
+    bill_number:   str        # bill / invoice reference number
+    billed_total:  str        # billed total from the hospital bill, raw string
 
 
 class RiskResult(TypedDict):
@@ -128,15 +130,17 @@ def rule_F1(
     prior_claims: list[PriorClaim],
 ) -> list[Finding]:
     """
-    F1: Patient name, hospital name, admission date and total amount are all
-    similar to a previously processed claim.
+    F1: Current claim closely resembles a prior claim.
 
-    Matching logic:
-      - patient  : token_sort_ratio >= F1_PATIENT_THRESHOLD
-      - hospital : token_sort_ratio >= F1_HOSPITAL_THRESHOLD
-      - Plus at least one of:
-            * admission dates within 3 days of each other, OR
-            * total amounts within F1_AMOUNT_TOLERANCE_PCT %
+    Matching fires when ANY of these conditions hold after patient and
+    hospital names pass their similarity thresholds:
+      (a) admission dates are within 3 days of each other, OR
+      (b) total amounts are within F1_AMOUNT_TOLERANCE_PCT %, OR
+      (c) bill_number matches exactly (non-empty).
+
+    Thresholds:
+      patient  : token_sort_ratio >= F1_PATIENT_THRESHOLD  (85)
+      hospital : token_sort_ratio >= F1_HOSPITAL_THRESHOLD (80)
 
     Weight 40.
     """
@@ -148,6 +152,7 @@ def rule_F1(
     hospital_val, hospital_doc, hospital_page = _first_field(docs, "hospital_name")
     adm_val,      adm_doc,      adm_page      = _first_field(docs, "admission_date")
     total_val,    total_doc,    total_page    = _first_field(docs, "total_amount")
+    bill_num_val, bill_num_doc, _             = _first_field(docs, "bill_number")
 
     if not patient_val or not hospital_val:
         return findings
@@ -157,32 +162,37 @@ def rule_F1(
 
     for prior in prior_claims:
         p_score = fuzz.token_sort_ratio(
-            patient_val.lower(), prior["patient_name"].lower()
+            patient_val.lower(), (prior.get("patient_name") or "").lower()
         )
         h_score = fuzz.token_sort_ratio(
-            hospital_val.lower(), prior["hospital_name"].lower()
+            hospital_val.lower(), (prior.get("hospital_name") or "").lower()
         )
 
         if p_score < F1_PATIENT_THRESHOLD or h_score < F1_HOSPITAL_THRESHOLD:
             continue
 
-        # Check supporting signals
+        # --- check supporting signals ---
         date_match   = False
         amount_match = False
+        bill_match   = False
 
-        prior_adm = _parse_date(prior["admission_date"]) if prior.get("admission_date") else None
+        prior_adm = _parse_date(prior.get("admission_date", "")) if prior.get("admission_date") else None
         if current_adm and prior_adm:
             date_match = abs((current_adm - prior_adm).days) <= 3
 
-        prior_amount = _amount(prior.get("total_amount", ""))
+        prior_amount = _amount(prior.get("total_amount", "") or prior.get("billed_total", "") or "")
         if current_amount and prior_amount and prior_amount != 0:
             pct_diff = abs(current_amount - prior_amount) / prior_amount * 100
             amount_match = pct_diff <= F1_AMOUNT_TOLERANCE_PCT
 
-        if not (date_match or amount_match):
+        prior_bill_num = (prior.get("bill_number") or "").strip()
+        if bill_num_val and prior_bill_num and bill_num_val == prior_bill_num:
+            bill_match = True
+
+        if not (date_match or amount_match or bill_match):
             continue
 
-        # Build evidence list from whichever fields contributed
+        # Build evidence list
         evidence: list[Evidence] = []
         if patient_doc:
             evidence.append(_evidence(patient_doc, patient_page))
@@ -190,6 +200,8 @@ def rule_F1(
             evidence.append(_evidence(hospital_doc, hospital_page))
 
         match_details = []
+        if bill_match:
+            match_details.append(f"bill number ({bill_num_val})")
         if date_match:
             match_details.append(f"admission date ({adm_val})")
         if amount_match:
@@ -276,6 +288,84 @@ def rule_F2(
                 f"Immediately suspend processing. Compare this claim with "
                 f"{prior['claim_id']} and request the insured to produce "
                 f"original documents for manual verification."
+            ),
+        ))
+
+    return findings
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# F2b – Same bill number and hospital as a prior claim
+# ─────────────────────────────────────────────────────────────────────────────
+
+def rule_F2b(
+    docs:          list[DocResult],
+    prior_claims:  list[PriorClaim],
+) -> list[Finding]:
+    """
+    F2b: The bill number on the current claim matches the bill number recorded
+    on a prior claim from the same hospital.
+
+    A bill number is the unique reference that a hospital assigns to an episode
+    of care; the same number cannot legitimately appear on two separate claims.
+
+    Weight 40.
+    """
+    findings: list[Finding] = []
+    if not prior_claims:
+        return findings
+
+    bill_num_val, bill_num_doc, bill_num_page = _first_field(docs, "bill_number")
+    hospital_val, hospital_doc, hospital_page = _first_field(docs, "hospital_name")
+
+    if not bill_num_val:
+        return findings
+
+    for prior in prior_claims:
+        prior_bill = (prior.get("bill_number") or "").strip()
+        prior_hosp = (prior.get("hospital_name") or "").strip()
+
+        if not prior_bill or bill_num_val != prior_bill:
+            continue
+
+        # Hospital name should also match (same bill number at different hospitals
+        # is theoretically possible though highly unusual; flag it regardless but
+        # note whether hospital also matches).
+        h_score = fuzz.token_sort_ratio(
+            hospital_val.lower(), prior_hosp.lower()
+        ) if hospital_val and prior_hosp else 0
+
+        evidence: list[Evidence] = []
+        if bill_num_doc:
+            evidence.append(_evidence(bill_num_doc, bill_num_page))
+        if hospital_doc and hospital_doc is not bill_num_doc:
+            evidence.append(_evidence(hospital_doc, hospital_page))
+
+        hosp_note = (
+            f", hospital name similarity {h_score}/100"
+            if hospital_val and prior_hosp else ""
+        )
+
+        findings.append(Finding(
+            rule_id="F2B-DUPLICATE-BILL-NUMBER",
+            severity="high",
+            weight=40,
+            what=(
+                f"Risk indicator: bill number {bill_num_val!r} was already "
+                f"submitted under claim {prior['claim_id']}{hosp_note}"
+            ),
+            evidence=evidence,
+            why_it_matters=(
+                f"A hospital invoice reference number uniquely identifies a "
+                f"single episode of care. Finding the same bill number "
+                f"({bill_num_val}) on a separate claim ({prior['claim_id']}) "
+                f"strongly suggests double billing or document reuse."
+            ),
+            suggested_action=(
+                f"Immediately cross-reference with claim {prior['claim_id']}. "
+                f"Contact the hospital directly to confirm whether two separate "
+                f"bills were legitimately issued with the same reference number "
+                f"before authorising any payment."
             ),
         ))
 
@@ -506,6 +596,11 @@ def rule_F5(
 # Risk scorer
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Rule-ID prefixes that represent duplicate-submission findings.
+# Any finding from these rules forces the risk level to High.
+_DUPLICATE_RULE_PREFIXES = ("F1-", "F2-", "F2B-")
+
+
 def compute_risk(findings: list[Finding]) -> RiskResult:
     """
     Combine all finding weights into a risk_score (0–100), map to a
@@ -515,20 +610,44 @@ def compute_risk(findings: list[Finding]) -> RiskResult:
     -------
     risk_score = min(sum(finding["weight"] for finding in findings), 100)
 
-    Thresholds
-    ----------
+    Base thresholds
+    ---------------
     Low    : score < 30
     Medium : 30 <= score <= 60
     High   : score > 60
+
+    Severity floors (applied after the score-based level)
+    ------------------------------------------------------
+    * Any finding with severity == "high"  → level is at least Medium.
+    * Any duplicate finding (rule_id starts with F1- or F2-) → level is High.
+
+    The final level is the maximum of the score-based level and any applicable
+    floor (Low < Medium < High).
     """
     score = min(sum(f["weight"] for f in findings), 100)
 
+    # ── score-based level ─────────────────────────────────────────────────
     if score > RISK_MEDIUM_THRESHOLD:
         level = "High"
     elif score >= RISK_LOW_THRESHOLD:
         level = "Medium"
     else:
         level = "Low"
+
+    # ── severity floors ───────────────────────────────────────────────────
+    _LEVEL_RANK = {"Low": 0, "Medium": 1, "High": 2}
+
+    for f in findings:
+        if any(f["rule_id"].startswith(p) for p in _DUPLICATE_RULE_PREFIXES):
+            level = "High"
+            break                    # can't go higher, stop early
+
+    if level != "High":
+        for f in findings:
+            if f.get("severity") == "high":
+                if _LEVEL_RANK[level] < _LEVEL_RANK["Medium"]:
+                    level = "Medium"
+                break
 
     reasons = [f["what"] for f in findings]
 
@@ -543,7 +662,7 @@ def compute_risk(findings: list[Finding]) -> RiskResult:
 # Public runner
 # ─────────────────────────────────────────────────────────────────────────────
 
-ALL_FRAUD_RULES = [rule_F1, rule_F2, rule_F3, rule_F4, rule_F5]
+ALL_FRAUD_RULES = [rule_F1, rule_F2, rule_F2b, rule_F3, rule_F4, rule_F5]
 
 
 def run_fraud_rules(
@@ -567,6 +686,7 @@ def run_fraud_rules(
     results: list[Finding] = []
     results.extend(rule_F1(docs, prior_claims or []))
     results.extend(rule_F2(docs, prior_claims or [], file_hashes or []))
+    results.extend(rule_F2b(docs, prior_claims or []))
     results.extend(rule_F3(docs))
     results.extend(rule_F4(docs, policy_start_date))
     results.extend(rule_F5(docs, file_paths or []))

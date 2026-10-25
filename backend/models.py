@@ -64,9 +64,14 @@ class Claim(Base):
     """
     __tablename__ = "claims"
 
-    id:            Mapped[str]        = mapped_column(String(64),  primary_key=True)
-    patient_name:  Mapped[str]        = mapped_column(String(256), nullable=False)
-    hospital_name: Mapped[str]        = mapped_column(String(256), nullable=False)
+    id:             Mapped[str]        = mapped_column(String(64),  primary_key=True)
+    patient_name:   Mapped[str]        = mapped_column(String(256), nullable=False)
+    hospital_name:  Mapped[str]        = mapped_column(String(256), nullable=False)
+    # Key clinical/billing fields stored at the claim level for fast duplicate checks
+    admission_date: Mapped[str | None] = mapped_column(String(32),  nullable=True)
+    discharge_date: Mapped[str | None] = mapped_column(String(32),  nullable=True)
+    bill_number:    Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    billed_total:   Mapped[str | None] = mapped_column(String(64),  nullable=True)
     status:        Mapped[ClaimStatus] = mapped_column(
                        Enum(ClaimStatus), nullable=False, default=ClaimStatus.pending
                    )

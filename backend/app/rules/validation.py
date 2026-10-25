@@ -247,7 +247,7 @@ def rule_V2(docs: list[DocResult]) -> list[Finding]:
     findings.append(Finding(
         rule_id="V2-CLAIMED-VS-BILLED-MISMATCH",
         severity=severity,
-        weight=25,
+        weight=40,
         what=(
             f"Claimed amount (Rs.\u00a0{claimed:,.2f}) {direction} "
             f"billed total (Rs.\u00a0{billed:,.2f}) "
@@ -541,6 +541,10 @@ _REQUIRED: dict[str, list[tuple[str, str]]] = {
 _SIGNATURE_ABSENT_VALUES = {"missing", "unknown", ""}
 
 
+_V5_SIGNATURE_WEIGHT = 30   # missing signature carries higher weight than other gaps
+_V5_MISSING_WEIGHT   = 15   # other missing required fields
+
+
 def rule_V5(docs: list[DocResult]) -> list[Finding]:
     """
     V5: Required fields are blank or flagged as missing.
@@ -548,50 +552,85 @@ def rule_V5(docs: list[DocResult]) -> list[Finding]:
     Claim form:   patient_name, policy_number, claimed_amount, signature_present
     Hospital bill: patient_name, hospital_name, bill_date, total_amount
 
-    Weight 15.
+    The missing-signature finding is emitted separately at weight 30 because
+    an unsigned claim form is a standalone compliance blocker.  All other
+    missing-field combinations use weight 15.
     """
     findings: list[Finding] = []
 
     for dtype, required_fields in _REQUIRED.items():
         for doc in _doc_by_type(docs, dtype):
-            missing: list[str] = []
-            evidence: list[Evidence] = []
+            sig_absent:   bool            = False
+            sig_evidence: Evidence | None = None
+
+            other_missing: list[str]     = []
+            other_evidence: list[Evidence] = []
 
             for field_name, label in required_fields:
                 val, page = _get(doc, field_name)
 
-                absent = False
                 if field_name == "signature_present":
                     absent = val.lower() in _SIGNATURE_ABSENT_VALUES
+                    if absent:
+                        sig_absent   = True
+                        sig_evidence = _evidence(doc, page)
                 else:
                     absent = not val
+                    if absent:
+                        other_missing.append(label)
+                        other_evidence.append(_evidence(doc, page))
 
-                if absent:
-                    missing.append(label)
-                    evidence.append(_evidence(doc, page))
+            # ── signature finding (weight 30) ────────────────────────────
+            if sig_absent:
+                findings.append(Finding(
+                    rule_id="V5-MISSING-REQUIRED-FIELDS",
+                    severity="low",
+                    weight=_V5_SIGNATURE_WEIGHT,
+                    what=(
+                        f"Missing required field in {dtype.replace('_', ' ')}: "
+                        f"Claimant Signature"
+                    ),
+                    evidence=[sig_evidence] if sig_evidence else [],
+                    why_it_matters=(
+                        "Claimant Signature is mandatory on the claim form. "
+                        "An unsigned claim form cannot be processed under IRDAI "
+                        "claim-settlement guidelines."
+                    ),
+                    suggested_action=(
+                        "Return the claim form to the insured and request a "
+                        "duly signed version before processing."
+                    ),
+                ))
 
-            if not missing:
-                continue
-
-            severity = "high" if len(missing) >= 3 else "medium" if len(missing) >= 2 else "low"
-            label_list = ", ".join(missing)
-            findings.append(Finding(
-                rule_id="V5-MISSING-REQUIRED-FIELDS",
-                severity=severity,
-                weight=15,
-                what=f"Missing required field(s) in {dtype.replace('_', ' ')}: {label_list}",
-                evidence=evidence,
-                why_it_matters=(
-                    f"The following mandatory field(s) are absent: {label_list}. "
-                    "An incomplete document cannot be processed under IRDAI "
-                    "claim-settlement guidelines."
-                ),
-                suggested_action=(
-                    f"Return the document to the insured / hospital and request "
-                    f"a corrected version with the missing field(s) filled: "
-                    f"{label_list}."
-                ),
-            ))
+            # ── other missing fields (weight 15) ─────────────────────────
+            if other_missing:
+                severity = (
+                    "high"   if len(other_missing) >= 3 else
+                    "medium" if len(other_missing) >= 2 else
+                    "low"
+                )
+                label_list = ", ".join(other_missing)
+                findings.append(Finding(
+                    rule_id="V5-MISSING-REQUIRED-FIELDS",
+                    severity=severity,
+                    weight=_V5_MISSING_WEIGHT,
+                    what=(
+                        f"Missing required field(s) in "
+                        f"{dtype.replace('_', ' ')}: {label_list}"
+                    ),
+                    evidence=other_evidence,
+                    why_it_matters=(
+                        f"The following mandatory field(s) are absent: "
+                        f"{label_list}. "
+                        "An incomplete document cannot be processed under IRDAI "
+                        "claim-settlement guidelines."
+                    ),
+                    suggested_action=(
+                        f"Return the document to the insured / hospital and "
+                        f"request a corrected version with the missing field(s) "
+                        f"filled: {label_list}."
+                    ),
+                ))
 
     return findings
 

@@ -129,7 +129,7 @@ class TestV2:
         assert len(findings) == 1
         f = findings[0]
         assert f["rule_id"] == "V2-CLAIMED-VS-BILLED-MISMATCH"
-        assert f["weight"] == 25
+        assert f["weight"] == 40
         assert "exceeds" in f["what"]
         assert f["severity"] in ("medium", "high")
 
@@ -294,10 +294,13 @@ class TestV5:
             _field("signature_present", "Missing"),          # ← missing
         ])
         findings = rule_V5([form])
-        assert len(findings) == 1
-        assert findings[0]["rule_id"] == "V5-MISSING-REQUIRED-FIELDS"
-        assert findings[0]["weight"] == 15
-        assert "Claimant Signature" in findings[0]["what"]
+        # Signature is split into its own finding at weight 30
+        sig_findings = [f for f in findings if "Claimant Signature" in f["what"]]
+        assert len(sig_findings) == 1
+        f = sig_findings[0]
+        assert f["rule_id"] == "V5-MISSING-REQUIRED-FIELDS"
+        assert f["weight"] == 30
+        assert "Claimant Signature" in f["what"]
 
     def test_fires_on_missing_policy_number(self):
         form = _claim_form(fields=[
@@ -307,7 +310,10 @@ class TestV5:
             _field("signature_present", "Present"),
         ])
         findings = rule_V5([form])
+        # Policy number goes to the 'other missing' finding at weight 15
         assert any("Policy Number" in f["what"] for f in findings)
+        policy_findings = [f for f in findings if "Policy Number" in f["what"]]
+        assert policy_findings[0]["weight"] == 15
 
     def test_fires_on_missing_bill_total(self):
         bill = _bill(fields=[
@@ -319,19 +325,30 @@ class TestV5:
         ])
         findings = rule_V5([bill])
         assert any("Total Amount" in f["what"] for f in findings)
+        total_findings = [f for f in findings if "Total Amount" in f["what"]]
+        assert total_findings[0]["weight"] == 15
 
     def test_clean_when_all_fields_present(self):
         assert rule_V5([_bill(), _claim_form()]) == []
 
     def test_severity_scales_with_missing_count(self):
+        # All 4 claim-form fields missing:
+        # → signature finding (weight=30, severity=low)
+        # → other 3-missing finding (weight=15, severity=high)
         form = _claim_form(fields=[
             _field("patient_name",      ""),   # missing 1
             _field("policy_number",     ""),   # missing 2
             _field("claimed_amount",    ""),   # missing 3
-            _field("signature_present", ""),   # missing 4
+            _field("signature_present", ""),   # missing 4 (signature)
         ])
         findings = rule_V5([form])
-        assert findings[0]["severity"] == "high"    # 3+ missing → high
+        # Expect exactly two findings: one sig, one other
+        assert len(findings) == 2
+        sig_f   = next(f for f in findings if "Claimant Signature" in f["what"])
+        other_f = next(f for f in findings if "Claimant Signature" not in f["what"])
+        assert sig_f["weight"]   == 30
+        assert other_f["weight"] == 15
+        assert other_f["severity"] == "high"   # 3 other fields → high
 
     def test_unknown_signature_treated_as_absent(self):
         form = _claim_form(fields=[
@@ -341,7 +358,9 @@ class TestV5:
             _field("signature_present", "Unknown"),    # treated as absent
         ])
         findings = rule_V5([form])
-        assert any("Claimant Signature" in f["what"] for f in findings)
+        sig_findings = [f for f in findings if "Claimant Signature" in f["what"]]
+        assert sig_findings, "Expected a V5 finding for Unknown signature"
+        assert sig_findings[0]["weight"] == 30
 
     def test_no_finding_for_unknown_doc_type(self):
         doc = {"filename": "x.pdf", "document_type": "unknown",
