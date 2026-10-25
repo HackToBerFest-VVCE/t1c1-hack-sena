@@ -5,12 +5,16 @@ POST /upload  →  extract structured claim info from hospital bill PDFs / image
 
 import re
 import shutil
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import pymupdf                          # PyMuPDF 2.x  (was 'fitz' in 1.x)
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+
+from database import Base, engine
+import models  # noqa: F401 – registers all ORM models with Base.metadata
 
 # ── paths ──────────────────────────────────────────────────────────────────────
 BASE_DIR    = Path(__file__).parent
@@ -21,7 +25,14 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"}
 PDF_EXT    = ".pdf"
 
 # ── app setup ─────────────────────────────────────────────────────────────────
-app = FastAPI(title="ClaimLens AI", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Create all database tables on startup (no-op if they already exist)."""
+    Base.metadata.create_all(bind=engine)
+    yield
+
+app = FastAPI(title="ClaimLens AI", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
