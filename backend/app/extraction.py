@@ -23,7 +23,9 @@ the rest of the pipeline can continue without OCR.
 
 from __future__ import annotations
 
+import json as _json
 import re
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -122,7 +124,122 @@ def _classify_document_type(text: str) -> str:
     return best_type
 
 
-# ── regex helpers ─────────────────────────────────────────────────────────────
+# ── next-line label helper ────────────────────────────────────────────────────
+
+# Labels that are themselves field headings (so we don't confuse them as values)
+_KNOWN_LABELS: frozenset[str] = frozenset({
+    "patient name", "insured name", "name of patient", "claimant name",
+    "policy number", "policy no",
+    "policy start date",
+    "hospital name",
+    "admission date", "discharge date", "bill date",
+    "claimed amount", "amount claimed",
+    "bill number", "original bill ref.",
+    "diagnosis",
+    "date of birth",
+    "insured details",
+    "hospitalisation details",
+    "claim details",
+    "declaration",
+    "treating doctor",
+    "clinical summary",
+    "bill particulars",
+    "sr.",
+    "description",
+    "amount",
+    "total amount",
+    "grand total",
+})
+
+
+def _normalise_line(line: str) -> str:
+    """Replace non-breaking spaces, collapse whitespace, strip."""
+    return re.sub(r"\s+", " ", line.replace("\xa0", " ")).strip()
+
+
+def _value_after_label(lines: list[str], label_variants: list[str]) -> str | None:
+    """
+    Given a list of text lines from a PDF page, find a line that matches one
+    of *label_variants* (case-insensitive, ignoring a trailing colon) and
+    return the next non-empty line — unless that line is itself a known label,
+    in which case return None.
+
+    Also supports "Label: value" on a single line as a fallback.
+
+    Parameters
+    ----------
+    lines:
+        Raw lines from ``page.get_text()``, one element per line.
+    label_variants:
+        The label spellings to try, e.g. ["Policy Number", "Policy No"].
+        Matching is done case-insensitively after normalisation.
+    """
+    norm_variants = {v.lower().rstrip(":").strip() for v in label_variants}
+
+    for i, raw_line in enumerate(lines):
+        norm = _normalise_line(raw_line).lower().rstrip(":").strip()
+        if norm not in norm_variants:
+            continue
+
+        # --- "Label: value" on the same line ---
+        # Check if the original line already contains ": something"
+        colon_m = re.match(
+            r"^[^:]+:\s*(.+)$",
+            _normalise_line(raw_line),
+            re.IGNORECASE,
+        )
+        if colon_m:
+            candidate = colon_m.group(1).strip()
+            if candidate:
+                return candidate
+
+        # --- value is on the NEXT non-empty line ---
+        for j in range(i + 1, len(lines)):
+            candidate = _normalise_line(lines[j])
+            if not candidate:
+                continue
+            # reject if it's itself a known label
+            candidate_lower = candidate.lower().rstrip(":").strip()
+            if candidate_lower in _KNOWN_LABELS:
+                return None
+            return candidate
+
+    return None
+
+
+# ── amount / date parsers ─────────────────────────────────────────────────────
+
+def _parse_amount(raw: str) -> float | None:
+    """Parse 'Rs. 32,071.25' or '32,071.25' → float, or None."""
+    m = re.search(r"([\d,]+(?:\.\d{1,2})?)", raw)
+    if not m:
+        return None
+    try:
+        return float(m.group(1).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def _parse_date_str(raw: str) -> datetime | None:
+    """Try common Indian date formats, return datetime or None."""
+    raw = re.sub(r"[./]", "-", raw.strip())
+    for fmt in (
+        "%d-%b-%Y",   # 14-Nov-2024
+        "%d/%b/%Y",
+        "%d-%m-%Y",   # 14-11-2024
+        "%d/%m/%Y",
+        "%d-%b-%y",   # 14-Nov-24
+        "%d/%m/%y",
+        "%Y-%m-%d",   # ISO
+    ):
+        try:
+            return datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+# ── regex helpers (kept for backward compat with _extract_line_items) ─────────
 
 def _first(pattern: str, text: str, flags: int = re.IGNORECASE) -> str | None:
     """Return the first capture group of pattern, or None."""
@@ -132,11 +249,12 @@ def _first(pattern: str, text: str, flags: int = re.IGNORECASE) -> str | None:
 
 def _date_pattern(label: str) -> str:
     """
-    Build a regex that matches '<label> : <date>' where the date and label
-    may be on the same line or on consecutive lines (common in fpdf2 output).
+    Build a regex that matches '<label>[: ]<date>' where label and date may
+    be on the same line OR on consecutive lines (common in fpdf2 output).
+    Non-breaking spaces (\\xa0) are treated like ordinary spaces.
     """
     date_rx = r"(\d{1,2}[-/]\w{2,9}[-/]\d{2,4}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})"
-    return rf"{label}\s*[:\-]?\s*\n?\s*{date_rx}"
+    return rf"{label}[\s\xa0]*[:\-]?[\s\xa0]*{date_rx}"
 
 
 # ── line-item extractor ───────────────────────────────────────────────────────
@@ -224,19 +342,60 @@ def _extract_line_items(text: str) -> list[dict[str, Any]]:
 # ── signature detector ────────────────────────────────────────────────────────
 
 def _detect_signature(text: str) -> str:
-    """Return 'Present', 'Missing', or 'Unknown'."""
+    """
+    Return 'Present', 'Missing', or 'Unknown'.
+
+    Reads the text inside the brackets on the "Claimant Signature" line:
+
+        Claimant Signature : [ Signed ]               → Present
+        Claimant Signature : [ Missing — not signed ] → Missing
+        Claimant Signature : [  ]                     → Missing (empty brackets)
+
+    Rules (applied in order so "not signed" wins over bare "signed"):
+    1. Look for the Claimant Signature line (case-insensitive).
+    2. Extract the content between "[" and "]".
+    3. If the bracket content is exactly "Signed" (case-insensitive) → Present.
+    4. If it contains "Missing" or "not signed" (case-insensitive), or the
+       brackets are empty/whitespace-only → Missing.
+    5. Fallback on the whole text if the dedicated line is absent.
+    """
+    # --- dedicated "Claimant Signature" line ---
+    sig_line_m = re.search(
+        r"claimant\s+signature\s*:?\s*\[([^\]]*)\]",
+        text,
+        re.IGNORECASE,
+    )
+    if sig_line_m:
+        inside = sig_line_m.group(1).strip()
+        if not inside:
+            return "Missing"
+        if re.fullmatch(r"signed", inside, re.IGNORECASE):
+            return "Present"
+        if re.search(r"\bmissing\b|\bnot\s+signed\b", inside, re.IGNORECASE):
+            return "Missing"
+        # Some other text inside brackets → treat as present
+        return "Present"
+
+    # --- fallback: prose or other layouts ---
     lower = text.lower()
+    # Check "missing" / "not signed" / "unsigned" before checking "signed"
+    if re.search(
+        r"\bsignature\b.*\bmissing\b"
+        r"|\bnot\s+signed\b"
+        r"|\bunsigned\b"
+        r"|\bno\s+signature\b",
+        lower,
+    ):
+        return "Missing"
     if re.search(r"\bsignature\b.*\bpresent\b|\bsigned\b", lower):
         return "Present"
-    if re.search(r"\bsignature\b.*\bmissing\b|\bunsigned\b|\bno\s+signature\b", lower):
-        return "Missing"
     if re.search(r"\bsignature\b", lower):
-        return "Present"   # signature field exists → assume present unless flagged
+        return "Present"
     return "Unknown"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Core field extractor (regex / heuristics)
+# Core field extractor (next-line label helper + targeted regex)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _extract_fields_from_text(
@@ -244,20 +403,32 @@ def _extract_fields_from_text(
     page_texts: list[str],
 ) -> list[FieldResult]:
     """
-    Run all regex extractors against full_text.
-    page_number is approximated by scanning each page for the matched value.
+    Extract named fields from the raw PDF text.
+
+    Header fields (patient_name, policy_number, etc.) are extracted with the
+    ``value_after_label`` helper that handles the "label on one line, value
+    on the next" layout produced by fpdf2, with an inline "Label: value"
+    fallback.
+
+    Line-item and total extraction use the existing regex-based helpers that
+    already work correctly.
     """
 
+    # Split every page into individual lines once; we search across all lines.
+    all_lines: list[str] = []
+    for pt in page_texts:
+        all_lines.extend(pt.splitlines())
+
     def _page_of(value: str) -> int:
-        """Return the 1-based page number where value first appears."""
+        """Return the 1-based page number where *value* first appears."""
         for i, pt in enumerate(page_texts, start=1):
             if value.lower() in pt.lower():
                 return i
         return 1
 
     def _field(name: str, value: str | None, page: int | None = None) -> FieldResult:
-        v   = (value or "").strip()
-        pg  = page if page is not None else (_page_of(v) if v else 1)
+        v  = (value or "").strip()
+        pg = page if page is not None else (_page_of(v) if v else 1)
         return FieldResult(
             name=name,
             value=v,
@@ -267,60 +438,109 @@ def _extract_fields_from_text(
 
     results: list[FieldResult] = []
 
-    # ── scalar fields ──────────────────────────────────────────────────────
-
-    # patient_name: label on one line, value on next (fpdf2) or same line
-    patient = (
-        _first(r"Patient\s+Name\s*[:\-]\s*\n?\s*(.+)", full_text)
-        or _first(r"Patient\s*[:\-]\s*(.+)", full_text)
-    )
+    # ── patient_name ──────────────────────────────────────────────────────
+    patient = _value_after_label(all_lines, [
+        "Patient Name",
+        "Insured Name",
+        "Name of Patient",
+        "Claimant Name",
+    ])
     results.append(_field("patient_name", patient))
 
-    # hospital_name: first non-empty line of the document
-    first_line = next(
-        (ln.strip() for ln in full_text.splitlines() if ln.strip()), None
-    )
-    results.append(_field("hospital_name", first_line, page=1))
+    # ── hospital_name ─────────────────────────────────────────────────────
+    # On hospital bills the hospital is the first line of the page.
+    # On claim forms the label "Hospital Name" appears in the body.
+    # We first try the label-based approach (for claim forms / discharge
+    # summaries); for bills the label also appears so this works universally.
+    hosp = _value_after_label(all_lines, ["Hospital Name"])
+    if not hosp:
+        # Fallback: first non-empty line of the document
+        hosp = next((ln.strip() for ln in all_lines if ln.strip()), None)
+    results.append(_field("hospital_name", hosp, page=1))
 
-    # policy_number
-    policy = _first(
-        r"Policy\s+(?:Number|No\.?)\s*[:\-]\s*\n?\s*(\S+)", full_text
-    )
+    # ── policy_number ─────────────────────────────────────────────────────
+    policy = _value_after_label(all_lines, ["Policy Number", "Policy No"])
     results.append(_field("policy_number", policy))
 
-    # dates
-    results.append(_field("bill_date",
-        _first(_date_pattern(r"Bill\s+Date"), full_text)))
-    results.append(_field("admission_date",
-        _first(_date_pattern(r"Admission\s+Date"), full_text)))
-    results.append(_field("discharge_date",
-        _first(_date_pattern(r"Discharge\s+Date"), full_text)))
+    # ── policy_start_date ─────────────────────────────────────────────────
+    raw_start = _value_after_label(all_lines, ["Policy Start Date"])
+    if raw_start:
+        dt = _parse_date_str(raw_start)
+        start_val = dt.strftime("%d-%b-%Y") if dt else raw_start
+    else:
+        start_val = None
+    results.append(_field("policy_start_date", start_val))
 
-    # claimed_amount
-    claimed = _first(
-        r"Claimed\s+Amount\s*[:\-]\s*\n?\s*(?:Rs\.?\s*|INR\s*)?([\d,]+(?:\.\d{1,2})?)",
-        full_text,
-    )
-    results.append(_field("claimed_amount", f"Rs. {claimed}" if claimed else ""))
+    # ── bill_date ─────────────────────────────────────────────────────────
+    raw_bd = _value_after_label(all_lines, ["Bill Date"])
+    if raw_bd:
+        dt = _parse_date_str(raw_bd)
+        bd_val = dt.strftime("%d-%b-%Y") if dt else raw_bd
+    else:
+        bd_val = None
+    results.append(_field("bill_date", bd_val))
 
-    # total_amount – last labelled total (handles wrong-total scenario too)
+    # ── admission_date ────────────────────────────────────────────────────
+    raw_ad = _value_after_label(all_lines, ["Admission Date"])
+    if raw_ad:
+        dt = _parse_date_str(raw_ad)
+        ad_val = dt.strftime("%d-%b-%Y") if dt else raw_ad
+    else:
+        ad_val = None
+    results.append(_field("admission_date", ad_val))
+
+    # ── discharge_date ────────────────────────────────────────────────────
+    raw_dd = _value_after_label(all_lines, ["Discharge Date"])
+    if raw_dd:
+        dt = _parse_date_str(raw_dd)
+        dd_val = dt.strftime("%d-%b-%Y") if dt else raw_dd
+    else:
+        dd_val = None
+    results.append(_field("discharge_date", dd_val))
+
+    # ── bill_number ───────────────────────────────────────────────────────
+    bill_num = _value_after_label(all_lines, ["Bill Number", "Original Bill Ref."])
+    results.append(_field("bill_number", bill_num))
+
+    # ── diagnosis ─────────────────────────────────────────────────────────
+    diag = _value_after_label(all_lines, ["Diagnosis"])
+    results.append(_field("diagnosis", diag))
+
+    # ── claimed_amount ────────────────────────────────────────────────────
+    raw_ca = _value_after_label(all_lines, ["Claimed Amount", "Amount Claimed"])
+    if raw_ca:
+        amt = _parse_amount(raw_ca)
+        ca_val = f"Rs. {amt:,.2f}" if amt is not None else raw_ca
+    else:
+        ca_val = None
+    results.append(_field("claimed_amount", ca_val))
+
+    # ── total_amount (from bill) ──────────────────────────────────────────
+    # The total appears as "TOTAL AMOUNT" on one line, then the value on the
+    # next.  We still keep the regex approach here because:
+    #  (a) it already works correctly for all 8 bundles, and
+    #  (b) the label "TOTAL AMOUNT" does NOT appear in _KNOWN_LABELS, so the
+    #      next-line helper would work too – but regex is more robust when the
+    #      total can be inline ("TOTAL AMOUNT   Rs. 32,071.25").
     total_m = re.search(
-        r"(?:TOTAL\s+AMOUNT|GRAND\s+TOTAL|Total\b)[^\d\n]*\n?"
-        r"(?:Rs\.?\s*|INR\s*)?([\d,]+(?:\.\d{1,2})?)",
+        r"(?:TOTAL[\s\xa0]+AMOUNT|GRAND[\s\xa0]+TOTAL|Total\b)"
+        r"[^\d\n]*\n?[\s\xa0]*"
+        r"(?:Rs\.?[\s\xa0]*|INR[\s\xa0]*)?([\d,]+(?:\.\d{1,2})?)",
         full_text,
         re.IGNORECASE,
     )
-    total = total_m.group(1) if total_m else None
-    results.append(_field("total_amount", f"Rs. {total}" if total else ""))
+    if total_m:
+        t_amt = _parse_amount(total_m.group(1))
+        total_val: str | None = f"Rs. {t_amt:,.2f}" if t_amt is not None else total_m.group(1)
+    else:
+        total_val = None
+    results.append(_field("total_amount", total_val))
 
-    # signature_present
+    # ── signature_present ─────────────────────────────────────────────────
     sig = _detect_signature(full_text)
     results.append(_field("signature_present", sig))
 
-    # ── line_items: stored as a single JSON-serialisable field ────────────
-    # We store the serialised list as the value string so it fits the
-    # FieldResult shape; callers that need structured data can json.loads it.
-    import json as _json
+    # ── line_items (JSON-serialised list) ─────────────────────────────────
     items = _extract_line_items(full_text)
     results.append(FieldResult(
         name="line_items",
@@ -356,7 +576,8 @@ def extract_document(file_path: str | Path) -> ExtractionResult:
 
     Notes
     -----
-    * This implementation uses PyMuPDF text extraction + regex.
+    * This implementation uses PyMuPDF text extraction + regex / next-line
+      label helpers.
     * Image files return a clearly labelled placeholder — no OCR is run.
     * The function signature is intentionally stable: a model-based version
       (e.g. Gemma 4) will replace only this function body.

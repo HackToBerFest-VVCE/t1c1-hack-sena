@@ -437,8 +437,90 @@ def rule_V4(docs: list[DocResult]) -> list[Finding]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# V5 – Missing required fields
+# V6 – Admission or discharge date outside the active policy period
 # ─────────────────────────────────────────────────────────────────────────────
+
+def rule_V6(docs: list[DocResult]) -> list[Finding]:
+    """
+    V6: Admission date or discharge date is before the policy start date,
+    meaning the treatment occurred before the policy was active.
+
+    Requires `policy_start_date` from the claim form and at least one of
+    `admission_date` / `discharge_date` from any document.
+
+    Weight 25 – high-severity coverage eligibility issue.
+    """
+    findings: list[Finding] = []
+
+    # ── find policy_start_date (claim form preferred) ────────────────────
+    policy_start: datetime | None = None
+    policy_doc:   DocResult | None = None
+    policy_page:  int = 1
+
+    for dtype in (DOCTYPE_CLAIM_FORM, DOCTYPE_DISCHARGE_SUMMARY, ""):
+        candidates = _doc_by_type(docs, dtype) if dtype else docs
+        for doc in candidates:
+            raw, page = _get(doc, "policy_start_date")
+            if raw:
+                dt = _parse_date(raw)
+                if dt:
+                    policy_start = dt
+                    policy_doc   = doc
+                    policy_page  = page
+                    break
+        if policy_start:
+            break
+
+    if not policy_start:
+        return findings
+
+    # ── helper: check a date field against policy start ──────────────────
+    def _check_date_field(field_name: str, label: str) -> None:
+        for dtype in (DOCTYPE_HOSPITAL_BILL, DOCTYPE_DISCHARGE_SUMMARY,
+                      DOCTYPE_CLAIM_FORM, DOCTYPE_PRESCRIPTION, ""):
+            candidates = _doc_by_type(docs, dtype) if dtype else docs
+            for doc in candidates:
+                raw, page = _get(doc, field_name)
+                if not raw:
+                    continue
+                dt = _parse_date(raw)
+                if dt is None:
+                    continue
+                if dt < policy_start:  # type: ignore[operator]
+                    evid: list[Evidence] = [_evidence(doc, page)]
+                    if policy_doc:
+                        evid.append(_evidence(policy_doc, policy_page))
+                    findings.append(Finding(
+                        rule_id="V6-DATE-OUTSIDE-POLICY-PERIOD",
+                        severity="high",
+                        weight=25,
+                        what=(
+                            f"{label} ({dt.strftime('%d-%b-%Y')}) is before "
+                            f"policy start date "
+                            f"({policy_start.strftime('%d-%b-%Y')})"
+                        ),
+                        evidence=evid,
+                        why_it_matters=(
+                            "Treatment that began before the policy inception "
+                            "date is not covered. Reimbursement of this claim "
+                            "would be outside the policy terms and conditions."
+                        ),
+                        suggested_action=(
+                            "Verify the policy start date on the policy "
+                            "document. If treatment pre-dates the policy, "
+                            "decline the claim citing the policy inception "
+                            "clause."
+                        ),
+                    ))
+                return  # report at most once per field across all docs
+
+    _check_date_field("admission_date",  "Admission date")
+    _check_date_field("discharge_date",  "Discharge date")
+
+    return findings
+
+
+
 
 # Per document-type: list of (field_name, human_label) that must be present
 _REQUIRED: dict[str, list[tuple[str, str]]] = {
@@ -518,7 +600,7 @@ def rule_V5(docs: list[DocResult]) -> list[Finding]:
 # Public runner
 # ─────────────────────────────────────────────────────────────────────────────
 
-ALL_RULES = [rule_V1, rule_V2, rule_V3, rule_V4, rule_V5]
+ALL_RULES = [rule_V1, rule_V2, rule_V3, rule_V4, rule_V5, rule_V6]
 
 
 def run_all_rules(docs: list[DocResult]) -> list[Finding]:
