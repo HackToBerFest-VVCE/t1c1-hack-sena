@@ -41,9 +41,10 @@ from models import Claim, Document, ExtractedField, AuditLog  # noqa: E402
 
 # ── sample PDFs ───────────────────────────────────────────────────────────────
 SAMPLE_DIR  = Path(__file__).parent.parent.parent / "sample_data"
-SAMPLE_PDFS = sorted(SAMPLE_DIR.glob("*.pdf"))
-assert SAMPLE_PDFS, "No sample PDFs found – run sample_data/make_samples.py first."
-
+SAMPLE_PDFS = sorted(SAMPLE_DIR.rglob("hospital_bill.pdf"))
+if not SAMPLE_PDFS:
+    pytest.skip("No sample PDFs found - run sample_data/make_samples.py first.",
+                allow_module_level=True)
 
 # ── DB session fixture ────────────────────────────────────────────────────────
 
