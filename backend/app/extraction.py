@@ -11,25 +11,46 @@ Returns
         "document_type": str,          # one of the DOCTYPE_* constants
         "fields":        list[dict],   # see FieldResult TypedDict
         "pages":         list[dict],   # {"page": int, "text": str}
+        "extraction_method": str,      # "gemma-4" | "regex-fallback"
+        "model_name":    str,          # model identifier used, or ""
     }
 
-The function signature is intentionally stable: a Gemma-4 / LLM-based
-implementation will replace only the body of extract_document() while
-callers and the DB layer remain unchanged.
+Extraction modes
+----------------
+    EXTRACTION_MODE=regex  (default)   – existing regex / next-line-label path
+    EXTRACTION_MODE=gemma              – Gemma 4 via google-genai SDK
 
-Image files (jpg, png, bmp, tiff, webp) return a placeholder result so
-the rest of the pipeline can continue without OCR.
+    GEMMA_MODEL (default "gemma-4-26b-a4b-it")
+    GEMINI_API_KEY – loaded from backend/.env (never hard-coded or logged)
+
+Image files (jpg, png, bmp, tiff, webp) are sent directly to Gemma when
+gemma mode is active; PDFs are rendered to PNG pages at 100 dpi.
+
+Caching
+-------
+Results are cached in memory keyed by SHA-256 of the file content so that
+re-uploading the same file does not trigger another API call.
 """
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json as _json
+import logging
+import os
 import re
+import time
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, TypedDict
 
 import pymupdf  # PyMuPDF 2.x  (import name changed from 'fitz')
+from pydantic import BaseModel, ValidationError
+
+# ── logging ───────────────────────────────────────────────────────────────────
+
+log = logging.getLogger(__name__)
 
 # ── document type constants ───────────────────────────────────────────────────
 
@@ -49,6 +70,17 @@ CONF_MISSING = 0.3   # field expected but not found
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"}
 PDF_EXT    = ".pdf"
 
+# MIME type map for direct image uploads to Gemma
+_MIME_MAP: dict[str, str] = {
+    ".jpg":  "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png":  "image/png",
+    ".bmp":  "image/bmp",
+    ".tiff": "image/tiff",
+    ".tif":  "image/tiff",
+    ".webp": "image/webp",
+}
+
 
 # ── typed return shapes ───────────────────────────────────────────────────────
 
@@ -65,20 +97,78 @@ class PageText(TypedDict):
 
 
 class ExtractionResult(TypedDict):
-    document_type: str
-    fields:        list[FieldResult]
-    pages:         list[PageText]
+    document_type:      str
+    fields:             list[FieldResult]
+    pages:              list[PageText]
+    extraction_method:  str   # "gemma-4" | "regex-fallback"
+    model_name:         str   # model identifier or ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Internal helpers
+# Pydantic model for Gemma JSON output validation
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ── document-type classifier ──────────────────────────────────────────────────
+class _LineItem(BaseModel):
+    description: str | None = None
+    amount: float | str | None = None
 
-# Each type maps to (required_keywords, bonus_keywords).
-# required: ALL must appear for the type to match.
-# bonus:    extra supporting keywords – tiebreak when multiple types match.
+
+class _GemmaResponse(BaseModel):
+    document_type:    str | None = None
+    patient_name:     Any        = None
+    policy_number:    Any        = None
+    policy_start:     Any        = None
+    hospital_name:    Any        = None
+    bill_number:      Any        = None
+    bill_date:        Any        = None
+    admission_date:   Any        = None
+    discharge_date:   Any        = None
+    diagnosis:        Any        = None
+    claimed_amount:   Any        = None
+    total_amount:     Any        = None
+    line_items:       list[_LineItem] | None = None
+    signature_present: Any       = None
+    # Per-field confidence maps – optional
+    confidence:       dict[str, float] | float | None = None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# In-memory extraction cache  {sha256_hex: ExtractionResult}
+# ─────────────────────────────────────────────────────────────────────────────
+
+_extraction_cache: dict[str, ExtractionResult] = {}
+
+
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Gemma instruction prompt
+# ─────────────────────────────────────────────────────────────────────────────
+
+_GEMMA_PROMPT = (
+    "Classify the document as claim_form, hospital_bill, discharge_summary or prescription. "
+    "Extract the following fields: "
+    "patient_name (called 'Insured Name' on claim forms), "
+    "policy_number, policy_start, hospital_name, bill_number, bill_date, "
+    "admission_date, discharge_date, diagnosis, claimed_amount, total_amount, "
+    "line_items (array of {description, amount}), "
+    "signature_present (set to false if the signature line says Missing or not signed). "
+    "Use null for anything not visible instead of guessing. "
+    "Give a confidence from 0 to 1 for each field in a 'confidence' object. "
+    "Return JSON only."
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Regex / label-based extraction helpers (preserved from original)
+# ─────────────────────────────────────────────────────────────────────────────
+
 _DOCTYPE_RULES: list[tuple[str, list[str], list[str]]] = [
     (
         DOCTYPE_HOSPITAL_BILL,
@@ -124,9 +214,6 @@ def _classify_document_type(text: str) -> str:
     return best_type
 
 
-# ── next-line label helper ────────────────────────────────────────────────────
-
-# Labels that are themselves field headings (so we don't confuse them as values)
 _KNOWN_LABELS: frozenset[str] = frozenset({
     "patient name", "insured name", "name of patient", "claimant name",
     "policy number", "policy no",
@@ -158,22 +245,6 @@ def _normalise_line(line: str) -> str:
 
 
 def _value_after_label(lines: list[str], label_variants: list[str]) -> str | None:
-    """
-    Given a list of text lines from a PDF page, find a line that matches one
-    of *label_variants* (case-insensitive, ignoring a trailing colon) and
-    return the next non-empty line — unless that line is itself a known label,
-    in which case return None.
-
-    Also supports "Label: value" on a single line as a fallback.
-
-    Parameters
-    ----------
-    lines:
-        Raw lines from ``page.get_text()``, one element per line.
-    label_variants:
-        The label spellings to try, e.g. ["Policy Number", "Policy No"].
-        Matching is done case-insensitively after normalisation.
-    """
     norm_variants = {v.lower().rstrip(":").strip() for v in label_variants}
 
     for i, raw_line in enumerate(lines):
@@ -181,8 +252,6 @@ def _value_after_label(lines: list[str], label_variants: list[str]) -> str | Non
         if norm not in norm_variants:
             continue
 
-        # --- "Label: value" on the same line ---
-        # Check if the original line already contains ": something"
         colon_m = re.match(
             r"^[^:]+:\s*(.+)$",
             _normalise_line(raw_line),
@@ -193,12 +262,10 @@ def _value_after_label(lines: list[str], label_variants: list[str]) -> str | Non
             if candidate:
                 return candidate
 
-        # --- value is on the NEXT non-empty line ---
         for j in range(i + 1, len(lines)):
             candidate = _normalise_line(lines[j])
             if not candidate:
                 continue
-            # reject if it's itself a known label
             candidate_lower = candidate.lower().rstrip(":").strip()
             if candidate_lower in _KNOWN_LABELS:
                 return None
@@ -206,8 +273,6 @@ def _value_after_label(lines: list[str], label_variants: list[str]) -> str | Non
 
     return None
 
-
-# ── amount / date parsers ─────────────────────────────────────────────────────
 
 def _parse_amount(raw: str) -> float | None:
     """Parse 'Rs. 32,071.25' or '32,071.25' → float, or None."""
@@ -239,38 +304,17 @@ def _parse_date_str(raw: str) -> datetime | None:
     return None
 
 
-# ── regex helpers (kept for backward compat with _extract_line_items) ─────────
-
 def _first(pattern: str, text: str, flags: int = re.IGNORECASE) -> str | None:
-    """Return the first capture group of pattern, or None."""
     m = re.search(pattern, text, flags)
     return m.group(1).strip() if m else None
 
 
 def _date_pattern(label: str) -> str:
-    """
-    Build a regex that matches '<label>[: ]<date>' where label and date may
-    be on the same line OR on consecutive lines (common in fpdf2 output).
-    Non-breaking spaces (\\xa0) are treated like ordinary spaces.
-    """
     date_rx = r"(\d{1,2}[-/]\w{2,9}[-/]\d{2,4}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})"
     return rf"{label}[\s\xa0]*[:\-]?[\s\xa0]*{date_rx}"
 
 
-# ── line-item extractor ───────────────────────────────────────────────────────
-
 def _extract_line_items(text: str) -> list[dict[str, Any]]:
-    """
-    Extract bill line items handling two layouts:
-
-    Layout A (fpdf2 / cell-per-line):
-        1
-        Room charges (5 days @ Rs. 4,500/day)
-        Rs. 22,500.00
-
-    Layout B (inline):
-        1  Room charges (5 days @ Rs. 4,500/day)  Rs. 22,500.00
-    """
     items: list[dict[str, Any]] = []
     seen:  set[str]             = set()
 
@@ -297,7 +341,6 @@ def _extract_line_items(text: str) -> list[dict[str, Any]]:
         except ValueError:
             pass
 
-    # Layout A – scan between "Bill Particulars" and "TOTAL"
     block_m = re.search(
         r"Bill\s+Particulars.*?\n(.*?)(?:TOTAL\s+AMOUNT|GRAND\s+TOTAL|Total\b)",
         text,
@@ -305,7 +348,6 @@ def _extract_line_items(text: str) -> list[dict[str, Any]]:
     )
     if block_m:
         lines = [ln.strip() for ln in block_m.group(1).splitlines() if ln.strip()]
-        # skip column-header lines
         start = next(
             (i + 1 for i, ln in enumerate(lines)
              if re.fullmatch(r"Sr\.?", ln, re.IGNORECASE) or ln.lower() in ("description", "amount")),
@@ -325,7 +367,6 @@ def _extract_line_items(text: str) -> list[dict[str, Any]]:
                 continue
             i += 1
 
-    # Layout B – inline  <sr?>  <description>  Rs. <amount>
     for m in re.finditer(
         r"^\s*(?:\d{1,3}\s+)?([A-Za-z][^\n]{5,100}?)\s+"
         r"(?:Rs\.?\s*|INR\s*)([\d,]+(?:\.\d{1,2})?)\s*$",
@@ -339,27 +380,7 @@ def _extract_line_items(text: str) -> list[dict[str, Any]]:
     return items
 
 
-# ── signature detector ────────────────────────────────────────────────────────
-
 def _detect_signature(text: str) -> str:
-    """
-    Return 'Present', 'Missing', or 'Unknown'.
-
-    Reads the text inside the brackets on the "Claimant Signature" line:
-
-        Claimant Signature : [ Signed ]               → Present
-        Claimant Signature : [ Missing — not signed ] → Missing
-        Claimant Signature : [  ]                     → Missing (empty brackets)
-
-    Rules (applied in order so "not signed" wins over bare "signed"):
-    1. Look for the Claimant Signature line (case-insensitive).
-    2. Extract the content between "[" and "]".
-    3. If the bracket content is exactly "Signed" (case-insensitive) → Present.
-    4. If it contains "Missing" or "not signed" (case-insensitive), or the
-       brackets are empty/whitespace-only → Missing.
-    5. Fallback on the whole text if the dedicated line is absent.
-    """
-    # --- dedicated "Claimant Signature" line ---
     sig_line_m = re.search(
         r"claimant\s+signature\s*:?\s*\[([^\]]*)\]",
         text,
@@ -373,12 +394,9 @@ def _detect_signature(text: str) -> str:
             return "Present"
         if re.search(r"\bmissing\b|\bnot\s+signed\b", inside, re.IGNORECASE):
             return "Missing"
-        # Some other text inside brackets → treat as present
         return "Present"
 
-    # --- fallback: prose or other layouts ---
     lower = text.lower()
-    # Check "missing" / "not signed" / "unsigned" before checking "signed"
     if re.search(
         r"\bsignature\b.*\bmissing\b"
         r"|\bnot\s+signed\b"
@@ -394,33 +412,15 @@ def _detect_signature(text: str) -> str:
     return "Unknown"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Core field extractor (next-line label helper + targeted regex)
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _extract_fields_from_text(
     full_text: str,
     page_texts: list[str],
 ) -> list[FieldResult]:
-    """
-    Extract named fields from the raw PDF text.
-
-    Header fields (patient_name, policy_number, etc.) are extracted with the
-    ``value_after_label`` helper that handles the "label on one line, value
-    on the next" layout produced by fpdf2, with an inline "Label: value"
-    fallback.
-
-    Line-item and total extraction use the existing regex-based helpers that
-    already work correctly.
-    """
-
-    # Split every page into individual lines once; we search across all lines.
     all_lines: list[str] = []
     for pt in page_texts:
         all_lines.extend(pt.splitlines())
 
     def _page_of(value: str) -> int:
-        """Return the 1-based page number where *value* first appears."""
         for i, pt in enumerate(page_texts, start=1):
             if value.lower() in pt.lower():
                 return i
@@ -438,31 +438,19 @@ def _extract_fields_from_text(
 
     results: list[FieldResult] = []
 
-    # ── patient_name ──────────────────────────────────────────────────────
     patient = _value_after_label(all_lines, [
-        "Patient Name",
-        "Insured Name",
-        "Name of Patient",
-        "Claimant Name",
+        "Patient Name", "Insured Name", "Name of Patient", "Claimant Name",
     ])
     results.append(_field("patient_name", patient))
 
-    # ── hospital_name ─────────────────────────────────────────────────────
-    # On hospital bills the hospital is the first line of the page.
-    # On claim forms the label "Hospital Name" appears in the body.
-    # We first try the label-based approach (for claim forms / discharge
-    # summaries); for bills the label also appears so this works universally.
     hosp = _value_after_label(all_lines, ["Hospital Name"])
     if not hosp:
-        # Fallback: first non-empty line of the document
         hosp = next((ln.strip() for ln in all_lines if ln.strip()), None)
     results.append(_field("hospital_name", hosp, page=1))
 
-    # ── policy_number ─────────────────────────────────────────────────────
     policy = _value_after_label(all_lines, ["Policy Number", "Policy No"])
     results.append(_field("policy_number", policy))
 
-    # ── policy_start_date ─────────────────────────────────────────────────
     raw_start = _value_after_label(all_lines, ["Policy Start Date"])
     if raw_start:
         dt = _parse_date_str(raw_start)
@@ -471,7 +459,6 @@ def _extract_fields_from_text(
         start_val = None
     results.append(_field("policy_start_date", start_val))
 
-    # ── bill_date ─────────────────────────────────────────────────────────
     raw_bd = _value_after_label(all_lines, ["Bill Date"])
     if raw_bd:
         dt = _parse_date_str(raw_bd)
@@ -480,7 +467,6 @@ def _extract_fields_from_text(
         bd_val = None
     results.append(_field("bill_date", bd_val))
 
-    # ── admission_date ────────────────────────────────────────────────────
     raw_ad = _value_after_label(all_lines, ["Admission Date"])
     if raw_ad:
         dt = _parse_date_str(raw_ad)
@@ -489,7 +475,6 @@ def _extract_fields_from_text(
         ad_val = None
     results.append(_field("admission_date", ad_val))
 
-    # ── discharge_date ────────────────────────────────────────────────────
     raw_dd = _value_after_label(all_lines, ["Discharge Date"])
     if raw_dd:
         dt = _parse_date_str(raw_dd)
@@ -498,15 +483,12 @@ def _extract_fields_from_text(
         dd_val = None
     results.append(_field("discharge_date", dd_val))
 
-    # ── bill_number ───────────────────────────────────────────────────────
     bill_num = _value_after_label(all_lines, ["Bill Number", "Original Bill Ref."])
     results.append(_field("bill_number", bill_num))
 
-    # ── diagnosis ─────────────────────────────────────────────────────────
     diag = _value_after_label(all_lines, ["Diagnosis"])
     results.append(_field("diagnosis", diag))
 
-    # ── claimed_amount ────────────────────────────────────────────────────
     raw_ca = _value_after_label(all_lines, ["Claimed Amount", "Amount Claimed"])
     if raw_ca:
         amt = _parse_amount(raw_ca)
@@ -515,13 +497,6 @@ def _extract_fields_from_text(
         ca_val = None
     results.append(_field("claimed_amount", ca_val))
 
-    # ── total_amount (from bill) ──────────────────────────────────────────
-    # The total appears as "TOTAL AMOUNT" on one line, then the value on the
-    # next.  We still keep the regex approach here because:
-    #  (a) it already works correctly for all 8 bundles, and
-    #  (b) the label "TOTAL AMOUNT" does NOT appear in _KNOWN_LABELS, so the
-    #      next-line helper would work too – but regex is more robust when the
-    #      total can be inline ("TOTAL AMOUNT   Rs. 32,071.25").
     total_m = re.search(
         r"(?:TOTAL[\s\xa0]+AMOUNT|GRAND[\s\xa0]+TOTAL|Total\b)"
         r"[^\d\n]*\n?[\s\xa0]*"
@@ -536,11 +511,9 @@ def _extract_fields_from_text(
         total_val = None
     results.append(_field("total_amount", total_val))
 
-    # ── signature_present ─────────────────────────────────────────────────
     sig = _detect_signature(full_text)
     results.append(_field("signature_present", sig))
 
-    # ── line_items (JSON-serialised list) ─────────────────────────────────
     items = _extract_line_items(full_text)
     results.append(FieldResult(
         name="line_items",
@@ -550,6 +523,342 @@ def _extract_fields_from_text(
     ))
 
     return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Regex-based public extraction (unchanged logic, new return fields)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _regex_extract(path: Path) -> ExtractionResult:
+    """Run the original regex / next-line-label extraction path."""
+    suffix = path.suffix.lower()
+
+    if suffix in IMAGE_EXTS:
+        placeholder_note = (
+            f"Image extraction pending model integration. File: {path.name}"
+        )
+        return ExtractionResult(
+            document_type=DOCTYPE_UNKNOWN,
+            fields=[
+                FieldResult(
+                    name="extraction_note",
+                    value=placeholder_note,
+                    confidence=0.0,
+                    page_number=0,
+                )
+            ],
+            pages=[PageText(page=1, text="[IMAGE FILE – no raw text available]")],
+            extraction_method="regex-fallback",
+            model_name="",
+        )
+
+    doc        = pymupdf.open(str(path))
+    page_texts = [page.get_text() for page in doc]
+    doc.close()
+
+    full_text     = "\n".join(page_texts)
+    document_type = _classify_document_type(full_text)
+    fields        = _extract_fields_from_text(full_text, page_texts)
+    pages         = [PageText(page=i + 1, text=t) for i, t in enumerate(page_texts)]
+
+    return ExtractionResult(
+        document_type=document_type,
+        fields=fields,
+        pages=pages,
+        extraction_method="regex-fallback",
+        model_name="",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Gemma 4 extraction path
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _load_gemini_client():
+    """
+    Load the Gemini API key from backend/.env and return a google.genai.Client.
+    Raises RuntimeError if the key is absent.
+    Never logs the key value.
+    """
+    from dotenv import load_dotenv
+
+    env_file = Path(__file__).resolve().parent.parent / ".env"
+    load_dotenv(dotenv_path=env_file, override=False)
+
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
+        raise RuntimeError(
+            "GEMINI_API_KEY not found. "
+            "Set it in backend/.env or as an environment variable."
+        )
+
+    from google import genai
+    return genai.Client(api_key=api_key)
+
+
+def _strip_json_fence(text: str) -> str:
+    """Remove a leading ```json ... ``` code fence if present."""
+    text = text.strip()
+    m = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, re.DOTALL | re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    return text
+
+
+def _coerce_amount(raw: Any) -> str:
+    """Convert an amount value (string like 'Rs. 32,071.25' or float) to 'Rs. X.XX'."""
+    if raw is None:
+        return ""
+    if isinstance(raw, (int, float)):
+        return f"Rs. {float(raw):,.2f}"
+    parsed = _parse_amount(str(raw))
+    if parsed is not None:
+        return f"Rs. {parsed:,.2f}"
+    return str(raw)
+
+
+def _coerce_date(raw: Any) -> str:
+    """Convert a date value to 'DD-Mon-YYYY' string, or return as-is."""
+    if raw is None:
+        return ""
+    dt = _parse_date_str(str(raw))
+    if dt:
+        return dt.strftime("%d-%b-%Y")
+    return str(raw)
+
+
+def _coerce_bool_to_str(raw: Any) -> str:
+    """Convert signature_present (bool/str) to 'Present'/'Missing'/'Unknown'."""
+    if raw is None:
+        return "Unknown"
+    if isinstance(raw, bool):
+        return "Present" if raw else "Missing"
+    s = str(raw).strip().lower()
+    if s in ("true", "yes", "present", "signed"):
+        return "Present"
+    if s in ("false", "no", "missing", "not signed", "unsigned"):
+        return "Missing"
+    return str(raw)
+
+
+def _gemma_response_to_fields(gr: _GemmaResponse) -> list[FieldResult]:
+    """Convert a validated _GemmaResponse into the standard FieldResult list."""
+
+    def _conf(field_name: str) -> float:
+        if isinstance(gr.confidence, dict):
+            return float(gr.confidence.get(field_name, CONF_MATCH))
+        if isinstance(gr.confidence, float):
+            return gr.confidence
+        return CONF_MATCH
+
+    def _f(name: str, value: str) -> FieldResult:
+        v = (value or "").strip()
+        return FieldResult(
+            name=name,
+            value=v,
+            confidence=_conf(name) if v else CONF_MISSING,
+            page_number=1,
+        )
+
+    results: list[FieldResult] = []
+
+    results.append(_f("patient_name",    str(gr.patient_name)    if gr.patient_name    is not None else ""))
+    results.append(_f("hospital_name",   str(gr.hospital_name)   if gr.hospital_name   is not None else ""))
+    results.append(_f("policy_number",   str(gr.policy_number)   if gr.policy_number   is not None else ""))
+    results.append(_f("policy_start_date", _coerce_date(gr.policy_start)))
+    results.append(_f("bill_date",       _coerce_date(gr.bill_date)))
+    results.append(_f("admission_date",  _coerce_date(gr.admission_date)))
+    results.append(_f("discharge_date",  _coerce_date(gr.discharge_date)))
+    results.append(_f("bill_number",     str(gr.bill_number)     if gr.bill_number     is not None else ""))
+    results.append(_f("diagnosis",       str(gr.diagnosis)       if gr.diagnosis       is not None else ""))
+    results.append(_f("claimed_amount",  _coerce_amount(gr.claimed_amount)))
+    results.append(_f("total_amount",    _coerce_amount(gr.total_amount)))
+    results.append(_f("signature_present", _coerce_bool_to_str(gr.signature_present)))
+
+    # line_items
+    items: list[dict[str, Any]] = []
+    if gr.line_items:
+        for li in gr.line_items:
+            desc = (li.description or "").strip()
+            if not desc:
+                continue
+            amt_raw = li.amount
+            if isinstance(amt_raw, str):
+                parsed = _parse_amount(amt_raw)
+                amt = parsed if parsed is not None else 0.0
+            elif isinstance(amt_raw, (int, float)):
+                amt = float(amt_raw)
+            else:
+                amt = 0.0
+            items.append({"description": desc, "amount": amt})
+
+    results.append(FieldResult(
+        name="line_items",
+        value=_json.dumps(items),
+        confidence=CONF_MATCH if items else CONF_MISSING,
+        page_number=1,
+    ))
+
+    return results
+
+
+def _call_gemma_with_retry(
+    client: Any,
+    model_name: str,
+    image_parts: list[Any],
+) -> str:
+    """
+    Call client.models.generate_content with up to 3 attempts on transient
+    API errors (500, 503, 429, timeouts).  Returns the raw text of the response.
+    Raises the last exception if all attempts fail.
+    Never logs API key values.
+    """
+    from google.genai import types
+
+    _RETRYABLE = (500, 503, 429)
+    _MAX_ATTEMPTS = 3
+    _RETRY_WAIT   = 3  # seconds
+
+    config = types.GenerateContentConfig(
+        thinking_config=types.ThinkingConfig(thinking_level="minimal"),
+    )
+
+    last_exc: Exception | None = None
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=image_parts + [_GEMMA_PROMPT],
+                config=config,
+            )
+            return response.text
+        except Exception as exc:
+            exc_type = type(exc).__name__
+            # Check for retryable status codes
+            status_code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+            is_retryable = (
+                status_code in _RETRYABLE
+                or "timeout" in exc_type.lower()
+                or "timeout" in str(exc).lower()
+                or (status_code is None and attempt < _MAX_ATTEMPTS)
+            )
+            log.warning(
+                "Gemma API error on attempt %d/%d: %s",
+                attempt, _MAX_ATTEMPTS, exc_type,
+                # intentionally NOT logging exc message to avoid key leakage
+            )
+            last_exc = exc
+            if not is_retryable or attempt == _MAX_ATTEMPTS:
+                break
+            time.sleep(_RETRY_WAIT)
+
+    raise last_exc  # type: ignore[misc]
+
+
+def _parse_gemma_json(raw_text: str, retry_once: bool = True) -> _GemmaResponse:
+    """
+    Strip the ```json fence, parse JSON, validate with Pydantic.
+    Retries once on validation failure (retry_once=True).
+
+    The retry scans the raw text for any embedded JSON code fence (the model
+    may prefix its answer with prose like "Here is the result:").
+    """
+    cleaned = _strip_json_fence(raw_text)
+    try:
+        data = _json.loads(cleaned)
+        return _GemmaResponse.model_validate(data)
+    except (_json.JSONDecodeError, ValidationError) as exc:
+        if retry_once:
+            log.warning("Gemma JSON parse/validation failed (%s); retrying once", type(exc).__name__)
+            # Aggressive retry: scan for any ```json ... ``` block anywhere in raw_text
+            fence_m = re.search(
+                r"```(?:json)?\s*(\{.*?\})\s*```",
+                raw_text,
+                re.DOTALL | re.IGNORECASE,
+            )
+            if fence_m:
+                try:
+                    data2 = _json.loads(fence_m.group(1))
+                    return _GemmaResponse.model_validate(data2)
+                except (_json.JSONDecodeError, ValidationError):
+                    pass
+            # Also try extracting the first {...} JSON object from raw_text
+            obj_m = re.search(r"\{.*\}", raw_text, re.DOTALL)
+            if obj_m:
+                try:
+                    data3 = _json.loads(obj_m.group(0))
+                    return _GemmaResponse.model_validate(data3)
+                except (_json.JSONDecodeError, ValidationError):
+                    pass
+        raise
+
+
+def _gemma_extract(path: Path) -> ExtractionResult:
+    """
+    Run the Gemma 4 extraction path for a single file.
+    Falls back to regex extraction if all API attempts fail.
+    """
+    from google.genai import types
+
+    suffix    = path.suffix.lower()
+    model_name = os.environ.get("GEMMA_MODEL", "gemma-4-26b-a4b-it")
+
+    # ── build image parts ─────────────────────────────────────────────────
+    image_parts: list[Any] = []
+    page_texts:  list[str] = []
+
+    if suffix in IMAGE_EXTS:
+        mime = _MIME_MAP.get(suffix, "image/png")
+        data = path.read_bytes()
+        image_parts.append(types.Part.from_bytes(data=data, mime_type=mime))
+        page_texts.append("[IMAGE FILE]")
+    elif suffix == PDF_EXT:
+        doc = pymupdf.open(str(path))
+        for page in doc:
+            # render at 100 dpi
+            mat    = pymupdf.Matrix(100 / 72, 100 / 72)
+            pixmap = page.get_pixmap(matrix=mat, alpha=False)
+            png_bytes = pixmap.tobytes("png")
+            image_parts.append(types.Part.from_bytes(data=png_bytes, mime_type="image/png"))
+            page_texts.append(page.get_text())
+        doc.close()
+    else:
+        log.warning("Unsupported file type for Gemma extraction: %s; falling back to regex", suffix)
+        return _regex_extract(path)
+
+    pages = [PageText(page=i + 1, text=t) for i, t in enumerate(page_texts)]
+
+    # ── call Gemma with retry ─────────────────────────────────────────────
+    try:
+        client    = _load_gemini_client()
+        raw_text  = _call_gemma_with_retry(client, model_name, image_parts)
+        gr        = _parse_gemma_json(raw_text, retry_once=True)
+    except Exception as exc:
+        log.error(
+            "Gemma extraction failed for %s (%s); falling back to regex",
+            path.name, type(exc).__name__,
+        )
+        fallback = _regex_extract(path)
+        fallback["extraction_method"] = "regex-fallback"
+        fallback["model_name"]        = model_name
+        return fallback
+
+    # ── resolve document type ─────────────────────────────────────────────
+    raw_dtype = (gr.document_type or "").lower().replace(" ", "_")
+    doc_type  = raw_dtype if raw_dtype in (
+        DOCTYPE_HOSPITAL_BILL, DOCTYPE_CLAIM_FORM,
+        DOCTYPE_DISCHARGE_SUMMARY, DOCTYPE_PRESCRIPTION,
+    ) else DOCTYPE_UNKNOWN
+
+    fields = _gemma_response_to_fields(gr)
+
+    return ExtractionResult(
+        document_type=doc_type,
+        fields=fields,
+        pages=pages,
+        extraction_method="gemma-4",
+        model_name=model_name,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -569,56 +878,36 @@ def extract_document(file_path: str | Path) -> ExtractionResult:
     -------
     ExtractionResult
         {
-            "document_type": str,
-            "fields":        list[FieldResult],
-            "pages":         list[PageText],
+            "document_type":     str,
+            "fields":            list[FieldResult],
+            "pages":             list[PageText],
+            "extraction_method": str,   # "gemma-4" | "regex-fallback"
+            "model_name":        str,   # model identifier or ""
         }
 
-    Notes
+    Modes
     -----
-    * This implementation uses PyMuPDF text extraction + regex / next-line
-      label helpers.
-    * Image files return a clearly labelled placeholder — no OCR is run.
-    * The function signature is intentionally stable: a model-based version
-      (e.g. Gemma 4) will replace only this function body.
+    Set the ``EXTRACTION_MODE`` environment variable:
+      * ``regex``  (default) – regex / next-line-label extraction; no API calls.
+      * ``gemma``            – Gemma 4 via google-genai; falls back to regex on
+                               persistent API failure.
+
+    Results are cached by file SHA-256 so re-uploading the same file is free.
     """
-    path   = Path(file_path)
-    suffix = path.suffix.lower()
+    path = Path(file_path)
+    mode = os.environ.get("EXTRACTION_MODE", "regex").lower()
 
-    # ── image placeholder ──────────────────────────────────────────────────
-    if suffix in IMAGE_EXTS:
-        placeholder_note = (
-            f"Image extraction pending model integration. File: {path.name}"
-        )
-        return ExtractionResult(
-            document_type=DOCTYPE_UNKNOWN,
-            fields=[
-                FieldResult(
-                    name="extraction_note",
-                    value=placeholder_note,
-                    confidence=0.0,
-                    page_number=0,
-                )
-            ],
-            pages=[PageText(page=1, text="[IMAGE FILE – no raw text available]")],
-        )
+    # ── cache lookup ──────────────────────────────────────────────────────
+    file_hash = _file_sha256(path)
+    if file_hash in _extraction_cache:
+        log.debug("Cache hit for %s (%s)", path.name, file_hash[:8])
+        return _extraction_cache[file_hash]
 
-    # ── PDF extraction ─────────────────────────────────────────────────────
-    doc        = pymupdf.open(str(path))
-    page_texts = [page.get_text() for page in doc]
-    doc.close()
+    # ── dispatch ──────────────────────────────────────────────────────────
+    if mode == "gemma":
+        result = _gemma_extract(path)
+    else:
+        result = _regex_extract(path)
 
-    full_text = "\n".join(page_texts)
-
-    document_type = _classify_document_type(full_text)
-    fields        = _extract_fields_from_text(full_text, page_texts)
-    pages         = [
-        PageText(page=i + 1, text=t)
-        for i, t in enumerate(page_texts)
-    ]
-
-    return ExtractionResult(
-        document_type=document_type,
-        fields=fields,
-        pages=pages,
-    )
+    _extraction_cache[file_hash] = result
+    return result
