@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { uploadClaim } from '../api'
 import type { DocumentType } from '../types'
@@ -7,7 +7,7 @@ import './UploadPage.css'
 // ── constants ─────────────────────────────────────────────────────────────────
 
 const ACCEPT      = '.pdf,.jpg,.jpeg,.png,.bmp,.tiff,.tif,.webp'
-const ACCEPT_MIME = 'application/pdf,image/jpeg,image/png,image/bmp,image/tiff,image/webp'
+const BACKEND_URL = 'http://localhost:8000'
 
 const DOC_TYPES: { value: DocumentType; label: string }[] = [
   { value: 'hospital_bill',     label: 'Hospital Bill'      },
@@ -55,13 +55,24 @@ function nextId() { return String(++_id) }
 export default function UploadPage() {
   const navigate = useNavigate()
 
-  const [entries,  setEntries]  = useState<FileEntry[]>([])
-  const [dragging, setDragging] = useState(false)
-  const [stage,    setStage]    = useState<UploadStage>('idle')
-  const [error,    setError]    = useState<string | null>(null)
+  const [entries,        setEntries]        = useState<FileEntry[]>([])
+  const [dragging,       setDragging]       = useState(false)
+  const [stage,          setStage]          = useState<UploadStage>('idle')
+  const [error,          setError]          = useState<string | null>(null)
+  const [extractionMode, setExtractionMode] = useState<'gemma' | 'regex' | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
   const busy = stage === 'uploading' || stage === 'processing' || stage === 'done'
+
+  // Fetch extraction mode from /health on mount so the processing message is accurate
+  useEffect(() => {
+    fetch(`${BACKEND_URL}/health`)
+      .then(r => r.json())
+      .then((d: { extraction_mode?: string }) => {
+        setExtractionMode(d.extraction_mode === 'gemma' ? 'gemma' : 'regex')
+      })
+      .catch(() => { /* non-critical – ignore */ })
+  }, [])
 
   // ── file management ──────────────────────────────────────────────────────
 
@@ -182,7 +193,11 @@ export default function UploadPage() {
             <div className="up-progress-inner">
               <span className="up-spinner" />
               <span className="up-progress-msg">
-                {stage === 'uploading' ? 'Uploading files…' : 'Extracting claim data…'}
+                {stage === 'uploading'
+                  ? 'Uploading files…'
+                  : extractionMode === 'gemma'
+                    ? 'Extracting fields with Gemma 4… this can take up to a minute'
+                    : 'Extracting claim data…'}
               </span>
             </div>
           ) : stage === 'done' ? (
@@ -304,7 +319,7 @@ export default function UploadPage() {
             disabled={entries.length === 0 || busy}
           >
             {inProgress
-              ? <><span className="up-btn-spinner" />{stage === 'uploading' ? 'Uploading…' : 'Processing…'}</>
+              ? <><span className="up-btn-spinner" />{stage === 'uploading' ? 'Uploading…' : extractionMode === 'gemma' ? 'Extracting with Gemma 4…' : 'Processing…'}</>
               : stage === 'done'
                 ? '✓ Done'
                 : `↑ Upload & Create Claim`}

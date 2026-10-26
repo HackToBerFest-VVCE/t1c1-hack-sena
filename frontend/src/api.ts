@@ -7,17 +7,39 @@
 import axios from 'axios'
 import { MOCK_CLAIMS, MOCK_AUDIT } from './mockData'
 import type { Claim, AuditEntry, Field } from './types'
+import { getToken, clearAuthSession } from './auth'
 
 const USE_MOCK    = false
 const BACKEND_URL = 'http://localhost:8000'
-const X_USER      = 'reviewer'
 
-// ── axios instance with default x-user header ─────────────────────────────────
+// ── axios instance with Bearer auth and 401 redirect ─────────────────────────
 
 const api = axios.create({
   baseURL: BACKEND_URL,
-  headers: { 'x-user': X_USER },
 })
+
+// Attach Authorization header if token exists
+api.interceptors.request.use(config => {
+  const token = getToken()
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
+})
+
+// Clear session and redirect to /login on 401
+api.interceptors.response.use(
+  response => response,
+  error => {
+    if (error.response?.status === 401) {
+      clearAuthSession()
+      if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+        window.location.href = '/login'
+      }
+    }
+    return Promise.reject(error)
+  },
+)
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -89,7 +111,6 @@ export async function updateField(
   // PATCH /fields/{fieldId}  →  FieldOut
   const { data } = await api.patch<Field>(`/fields/${fieldId}`, {
     value: newValue,
-    user:  X_USER,
   })
   return data
 }
@@ -100,7 +121,7 @@ export async function updateField(
  * Submit an adjudication decision for a claim.
  *
  * Backend endpoint: POST /claims/{claimId}/decision
- * Body: { decision: string, comment: string, user: string }
+ * Body: { decision: string, comment: string }
  * Note: the backend calls the optional note field "comment", not "note".
  */
 export async function submitDecision(
@@ -119,7 +140,6 @@ export async function submitDecision(
   const { data } = await api.post<Claim>(`/claims/${claimId}/decision`, {
     decision,
     comment: comment ?? '',
-    user:    X_USER,
   })
   return data
 }
@@ -162,25 +182,37 @@ export async function uploadClaim(files: File[]): Promise<Claim> {
   files.forEach(f => form.append('files', f))
   // axios will set the correct multipart/form-data Content-Type with boundary;
   // do not override it here.
-  const { data } = await api.post<Claim>('/claims', form)
+  // 3-minute timeout: Gemma extraction can take up to 60 s per document and
+  // a claim bundle has up to 3 documents processed in parallel.
+  const { data } = await api.post<Claim>('/claims', form, { timeout: 180_000 })
   return data
 }
 
-// ── getPageImageUrl ───────────────────────────────────────────────────────────
+// ── getPageImageBlob ──────────────────────────────────────────────────────────
 
 /**
- * Build the URL for a single document page image.
+ * Fetch a single document page image as a Blob, authenticated via the
+ * existing axios instance (which injects the Bearer token).
+ *
+ * Returns the Blob on success, or throws an error with a `status` property
+ * on HTTP failure so callers can surface the status code to the user.
  *
  * Backend endpoint: GET /claims/{claimId}/pages/{docId}/{pageNumber}
- * Returns image/png directly — no JSON wrapper.
- * We return the URL string so <img src={...}> can load it natively.
+ * Response:         image/png binary
+ *
+ * Use URL.createObjectURL(blob) to get an <img>-compatible src string, and
+ * call URL.revokeObjectURL when it is no longer needed.
  */
-export function getPageImageUrl(
+export async function getPageImageBlob(
   claimId:    string,
   docId:      number,
   pageNumber: number,
-): string {
-  return `${BACKEND_URL}/claims/${claimId}/pages/${docId}/${pageNumber}`
+): Promise<Blob> {
+  const response = await api.get(
+    `/claims/${claimId}/pages/${docId}/${pageNumber}`,
+    { responseType: 'blob' },
+  )
+  return response.data as Blob
 }
 
 // ── getAudit ──────────────────────────────────────────────────────────────────
@@ -204,3 +236,49 @@ export async function getAudit(claimId?: string): Promise<AuditEntry[]> {
   })
   return data
 }
+
+// ── Auth APIs ─────────────────────────────────────────────────────────────────
+
+export interface AuthResponse {
+  access_token: string
+  token_type:   string
+  user: {
+    id:    number
+    name:  string
+    email: string
+    role:  string
+  }
+}
+
+export interface SignupPayload {
+  full_name:        string
+  email:            string
+  password:         string
+  confirm_password: string
+  invite_code?:     string
+}
+
+export interface MeResponse {
+  name:  string
+  email: string
+  role:  string
+}
+
+/** Authenticate with email and password. */
+export async function loginApi(email: string, password: string): Promise<AuthResponse> {
+  const { data } = await api.post<AuthResponse>('/auth/login', { email, password })
+  return data
+}
+
+/** Register a new reviewer or supervisor account. */
+export async function signupApi(payload: SignupPayload): Promise<AuthResponse> {
+  const { data } = await api.post<AuthResponse>('/auth/signup', payload)
+  return data
+}
+
+/** Fetch authenticated user profile from token. */
+export async function getMeApi(): Promise<MeResponse> {
+  const { data } = await api.get<MeResponse>('/auth/me')
+  return data
+}
+

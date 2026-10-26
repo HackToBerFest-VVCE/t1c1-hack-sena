@@ -93,7 +93,7 @@ export default function AuditPage() {
   const [entries,    setEntries]    = useState<AuditEntry[]>([])
   const [loading,    setLoading]    = useState(true)
   const [error,      setError]      = useState<string | null>(null)
-  const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [expandedId, setExpandedId] = useState<number | null>(null)
 
   // filters
   const [claimFilter,  setClaimFilter]  = useState('')
@@ -153,7 +153,7 @@ export default function AuditPage() {
     setDateFrom(''); setDateTo('')
   }
 
-  function toggleExpand(id: string) {
+  function toggleExpand(id: number) {
     setExpandedId(prev => (prev === id ? null : id))
   }
 

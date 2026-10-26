@@ -4,8 +4,15 @@ ClaimLens AI – FastAPI backend
 
 from __future__ import annotations
 
+# ── load .env FIRST so every subsequent import sees the env vars ──────────────
+from pathlib import Path as _Path
+from dotenv import load_dotenv as _load_dotenv
+_load_dotenv(dotenv_path=_Path(__file__).parent / ".env", override=False)
+
 import hashlib
 import io
+import logging
+import os
 import shutil
 import uuid
 from contextlib import asynccontextmanager
@@ -20,15 +27,30 @@ from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
-from database import Base, engine, get_db
+from database import Base, SessionLocal, engine, get_db
 import models
 from models import (
     AuditLog, Claim, ClaimStatus, Document, DocumentType,
-    ExtractedField, Finding, RiskLevel, Severity,
+    ExtractedField, Finding, RiskLevel, Severity, User,
 )
-from app.extraction import extract_document
+from auth import (
+    create_access_token, get_current_user, get_supervisor_invite_code,
+    hash_password, login_limiter, require_supervisor,
+    seed_demo_accounts_if_empty, validate_email_format,
+    validate_password_strength, verify_password,
+)
+from app.extraction import extract_document, extract_documents_parallel
 from app.rules.validation import run_all_rules
 from app.rules.fraud import compute_risk, run_fraud_rules, PriorClaim
+
+# ── logging ───────────────────────────────────────────────────────────────────
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
+log = logging.getLogger(__name__)
 
 # ── paths ─────────────────────────────────────────────────────────────────────
 
@@ -40,15 +62,39 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"}
 PDF_EXT    = ".pdf"
 ALLOWED_EXTS = {PDF_EXT} | IMAGE_EXTS
 
+
+def _extraction_startup_info() -> dict:
+    """
+    Read extraction config from env at call time (never at import time).
+    Returns a dict with mode, model, and api_key_set — never the key value.
+    """
+    mode        = os.environ.get("EXTRACTION_MODE", "regex").lower()
+    model       = os.environ.get("GEMMA_MODEL", "gemma-4-26b-a4b-it")
+    api_key_set = bool(os.environ.get("GEMINI_API_KEY", "").strip())
+    return {"mode": mode, "model": model, "api_key_set": api_key_set}
+
+
 # ── startup ───────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     Base.metadata.create_all(bind=engine)
+    with SessionLocal() as db:
+        seed_demo_accounts_if_empty(db)
+    info = _extraction_startup_info()
+    log.info(
+        "Extraction mode: %s, model: %s, API key set: %s",
+        info["mode"],
+        info["model"],
+        "yes" if info["api_key_set"] else "no",
+    )
     yield
 
 app = FastAPI(title="ClaimLens AI", version="0.2.0", lifespan=lifespan)
 
+# ── CORS ──────────────────────────────────────────────────────────────────────
+# Must be added BEFORE the exception handler so CORS headers are present on
+# all responses, including 4xx/5xx error responses.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
@@ -56,6 +102,30 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Global exception handler ──────────────────────────────────────────────────
+# Catches any unhandled exception (including SQLAlchemy / Pydantic errors that
+# escape route handlers) and returns a plain JSON 500 instead of the default
+# Starlette text/html 500, which would be opaque to the browser and bypass CORS.
+import traceback as _traceback
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(Exception)
+async def _global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    # Try to pull a claim_id from the path for easier log correlation.
+    claim_id = request.path_params.get("claim_id", "—")
+    log.error(
+        "Unhandled exception on %s %s  claim_id=%s\n%s",
+        request.method,
+        request.url.path,
+        claim_id,
+        _traceback.format_exc(),
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal error"},
+    )
 
 # ── Pydantic response / request models ───────────────────────────────────────
 
@@ -70,11 +140,13 @@ class FieldOut(BaseModel):
 
 
 class DocumentOut(BaseModel):
-    id:            int
-    filename:      str
-    document_type: str
-    page_count:    int
-    fields:        list[FieldOut] = []
+    id:                 int
+    filename:           str
+    document_type:      str
+    page_count:         int
+    fields:             list[FieldOut] = []
+    extraction_method:  str = ""
+    model_name:         str = ""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -131,6 +203,41 @@ class DecisionBody(BaseModel):
     decision: str   # "approved" | "queried" | "escalated"
     comment:  str = ""
     user:     str = "reviewer"
+
+
+class SignupRequest(BaseModel):
+    full_name:        str
+    email:            str
+    password:         str
+    confirm_password: str
+    invite_code:      str | None = None
+
+
+class LoginRequest(BaseModel):
+    email:    str
+    password: str
+
+
+class UserOut(BaseModel):
+    id:    int
+    name:  str
+    email: str
+    role:  str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TokenOut(BaseModel):
+    access_token: str
+    token_type:   str = "bearer"
+    user:         UserOut
+
+
+class MeOut(BaseModel):
+    name:  str
+    email: str
+    role:  str
+
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -266,13 +373,136 @@ def _recompute_risk(claim: Claim, db: Session) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# GET /health
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/health")
+def health() -> dict:
+    """
+    Returns the current extraction configuration so operators can verify
+    the running mode without digging through logs.
+    Never exposes the API key value.
+    """
+    info = _extraction_startup_info()
+    return {
+        "extraction_mode": info["mode"],
+        "model":           info["model"],
+        "api_key_set":     info["api_key_set"],
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Auth routes
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/auth/signup", response_model=TokenOut, status_code=201)
+def signup(body: SignupRequest, db: Session = Depends(get_db)):
+    """
+    Register a new reviewer or supervisor account.
+    Role is supervisor only if invite_code equals SUPERVISOR_INVITE_CODE from .env;
+    otherwise reviewer.
+    """
+    clean_name = body.full_name.strip()
+    if not clean_name:
+        raise HTTPException(422, "Full name is required.")
+
+    clean_email = body.email.strip().lower()
+    if not validate_email_format(clean_email):
+        raise HTTPException(422, "Invalid email format.")
+
+    if body.password != body.confirm_password:
+        raise HTTPException(422, "Passwords do not match.")
+
+    if not validate_password_strength(body.password):
+        raise HTTPException(
+            422,
+            "Password must be at least 8 characters and contain at least one letter and one number.",
+        )
+
+    existing = db.query(User).filter(User.email == clean_email).first()
+    if existing:
+        raise HTTPException(400, "Email is already registered.")
+
+    expected_code = get_supervisor_invite_code()
+    if body.invite_code and expected_code and body.invite_code.strip() == expected_code:
+        role = "supervisor"
+    else:
+        role = "reviewer"
+
+    new_user = User(
+        full_name=clean_name,
+        email=clean_email,
+        password_hash=hash_password(body.password),
+        role=role,
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+
+    token = create_access_token(new_user)
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {
+            "id": new_user.id,
+            "name": new_user.full_name,
+            "email": new_user.email,
+            "role": new_user.role,
+        },
+    }
+
+
+@app.post("/auth/login", response_model=TokenOut)
+def login(body: LoginRequest, db: Session = Depends(get_db)):
+    """
+    Authenticate an existing user.
+    Generic 'Invalid email or password' error on unknown email or wrong password.
+    Returns 429 after 5 failed attempts within 10 minutes.
+    """
+    clean_email = body.email.strip().lower()
+    login_limiter.check_allowed(clean_email)
+
+    user = db.query(User).filter(User.email == clean_email).first()
+    if not user or not verify_password(body.password, user.password_hash):
+        login_limiter.record_failure(clean_email)
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid email or password",
+        )
+
+    login_limiter.record_success(clean_email)
+    token = create_access_token(user)
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {
+            "id": user.id,
+            "name": user.full_name,
+            "email": user.email,
+            "role": user.role,
+        },
+    }
+
+
+@app.get("/auth/me", response_model=MeOut)
+def get_me(current_user: User = Depends(get_current_user)):
+    """Return name, email, and role from the current user token."""
+    return {
+        "name": current_user.full_name,
+        "email": current_user.email,
+        "role": current_user.role,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # POST /claims
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.post("/claims", response_model=ClaimDetail, status_code=201)
 async def create_claim(
     files: list[UploadFile] = File(...),
-    x_user: str = Header(default="system"),
+    current_user: User = Depends(get_current_user),
+    x_user: str | None = None,
     db: Session = Depends(get_db),
 ):
     """
@@ -286,11 +516,11 @@ async def create_claim(
     if not files:
         raise HTTPException(422, "No files provided.")
 
-    # ── 1. save & extract every file ────────────────────────────────────────
-    claim_id  = f"CLM-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
-    saved_paths: list[Path] = []
-    doc_results: list[dict] = []
-    orm_docs:    list[Document] = []
+    # ── 1. save all files first, then extract in parallel ────────────────────
+    claim_id     = f"CLM-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+    saved_paths: list[Path]  = []
+    dest_names:  list[str]   = []
+    raw_names:   list[str]   = []
 
     for upload in files:
         raw_name = Path(upload.filename or "file").name
@@ -298,15 +528,21 @@ async def create_claim(
         if suffix not in ALLOWED_EXTS:
             raise HTTPException(422, f"Unsupported file type: {suffix}")
 
-        # avoid filename collisions across claims
         dest_name = f"{claim_id}_{raw_name}"
         dest      = UPLOADS_DIR / dest_name
         with dest.open("wb") as fh:
             shutil.copyfileobj(upload.file, fh)
         saved_paths.append(dest)
+        dest_names.append(dest_name)
+        raw_names.append(raw_name)
 
-        extraction = extract_document(dest)
+    # Parallel extraction (max 3 workers); each call handles its own retry/fallback
+    extractions = extract_documents_parallel(saved_paths, max_workers=3)
 
+    doc_results: list[dict] = []
+    orm_docs:    list[Document] = []
+
+    for dest_name, dest, extraction in zip(dest_names, saved_paths, extractions):
         raw_text  = "\n\n".join(p["text"] for p in extraction["pages"])
         doc_type  = _doc_type_enum(extraction["document_type"])
         page_cnt  = len(extraction["pages"])
@@ -317,6 +553,8 @@ async def create_claim(
             document_type=doc_type,
             page_count=page_cnt,
             raw_text=raw_text,
+            extraction_method=extraction.get("extraction_method", ""),
+            model_name=extraction.get("model_name", ""),
         )
 
         for fld in extraction["fields"]:
@@ -377,7 +615,8 @@ async def create_claim(
     _recompute_risk(claim, db)
 
     # ── 5. audit ─────────────────────────────────────────────────────────────
-    _audit(db, x_user, "CLAIM_CREATED", claim_id,
+    actor = current_user.full_name if isinstance(current_user, User) else (x_user or "reviewer")
+    _audit(db, actor, "CLAIM_CREATED", claim_id,
            before=None,
            after={"patient": patient_name, "hospital": hospital_name,
                   "files": [p.name for p in saved_paths]})
@@ -391,7 +630,10 @@ async def create_claim(
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/claims", response_model=list[ClaimSummary])
-def list_claims(db: Session = Depends(get_db)):
+def list_claims(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Return all claims sorted by risk_score descending."""
     return (
         db.query(Claim)
@@ -405,7 +647,11 @@ def list_claims(db: Session = Depends(get_db)):
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/claims/{claim_id}", response_model=ClaimDetail)
-def get_claim(claim_id: str, db: Session = Depends(get_db)):
+def get_claim(
+    claim_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     claim = db.query(Claim).filter(Claim.id == claim_id).first()
     if not claim:
         raise HTTPException(404, f"Claim {claim_id!r} not found.")
@@ -420,6 +666,7 @@ def get_claim(claim_id: str, db: Session = Depends(get_db)):
 def patch_field(
     field_id: int,
     body: FieldPatch,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """
@@ -434,8 +681,9 @@ def patch_field(
     field.value      = body.value
     field.confidence = 1.0   # human-corrected → full confidence
 
+    actor = current_user.full_name if isinstance(current_user, User) else getattr(body, "user", "reviewer")
     claim = field.document.claim
-    _audit(db, body.user, "FIELD_UPDATED", claim.id,
+    _audit(db, actor, "FIELD_UPDATED", claim.id,
            before={"field_id": field_id, "name": field.name, "value": old_value},
            after={"field_id":  field_id, "name": field.name, "value": body.value})
 
@@ -457,17 +705,26 @@ ALLOWED_DECISIONS = {"approved", "queried", "escalated"}
 def submit_decision(
     claim_id: str,
     body: DecisionBody,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """
     Set the adjudication decision. Only 'approved', 'queried', 'escalated'
     are accepted. 'rejected' is explicitly forbidden.
+    'approved' and 'escalated' require supervisor role. Reviewers can only query.
     """
     if body.decision not in ALLOWED_DECISIONS:
         raise HTTPException(
             422,
             f"Decision '{body.decision}' is not allowed. "
             f"Valid values: {sorted(ALLOWED_DECISIONS)}."
+        )
+
+    user_role = current_user.role if isinstance(current_user, User) else "supervisor"
+    if body.decision in ("approved", "escalated") and user_role != "supervisor":
+        raise HTTPException(
+            403,
+            f"Decision '{body.decision}' requires supervisor role. Reviewers can only query.",
         )
 
     claim = db.query(Claim).filter(Claim.id == claim_id).first()
@@ -478,7 +735,8 @@ def submit_decision(
     claim.status = ClaimStatus(body.decision)
 
     action_label = f"CLAIM_{body.decision.upper()}"
-    _audit(db, body.user, action_label, claim_id,
+    actor = current_user.full_name if isinstance(current_user, User) else getattr(body, "user", "reviewer")
+    _audit(db, actor, action_label, claim_id,
            before={"status": old_status},
            after={"status": body.decision, "comment": body.comment})
 
@@ -496,6 +754,7 @@ def get_page_image(
     claim_id: str,
     doc_id:   int,
     page_number: int,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """
@@ -550,6 +809,7 @@ def get_page_image(
 @app.get("/audit", response_model=list[AuditOut])
 def get_audit(
     claim_id: str | None = None,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """

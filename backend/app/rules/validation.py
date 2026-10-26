@@ -34,10 +34,13 @@ All rules are collected in ALL_RULES and can be run in one call via
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from typing import TypedDict
 
 from rapidfuzz import fuzz
+
+log = logging.getLogger(__name__)
 
 # ── shared type hints ─────────────────────────────────────────────────────────
 
@@ -82,37 +85,15 @@ def _get(doc: DocResult, field_name: str) -> tuple[str, int]:
 
 
 def _amount(raw: str) -> float | None:
-    """Parse 'Rs. 1,23,456.78' or '1,23,456.78' → float, or None on failure."""
-    import re
-    m = re.search(r"([\d,]+(?:\.\d{1,2})?)", raw)
-    if not m:
-        return None
-    try:
-        return float(m.group(1).replace(",", ""))
-    except ValueError:
-        return None
+    """Parse amount strings to float via the shared normaliser."""
+    from app.rules.normalise import normalise_amount
+    return normalise_amount(raw)
 
 
 def _parse_date(raw: str) -> datetime | None:
-    """Try a handful of common Indian date formats, return datetime or None."""
-    import re
-    raw = raw.strip()
-    formats = [
-        "%d-%b-%Y",   # 14-Nov-2024
-        "%d/%b/%Y",
-        "%d-%m-%Y",   # 14-11-2024
-        "%d/%m/%Y",
-        "%d-%b-%y",   # 14-Nov-24
-        "%d/%m/%y",
-    ]
-    # normalise separator
-    raw = re.sub(r"[./]", "-", raw)
-    for fmt in formats:
-        try:
-            return datetime.strptime(raw, fmt)
-        except ValueError:
-            continue
-    return None
+    """Parse Indian date strings via the shared normaliser."""
+    from app.rules.normalise import normalise_date
+    return normalise_date(raw)
 
 
 def _doc_by_type(docs: list[DocResult], dtype: str) -> list[DocResult]:
@@ -529,16 +510,21 @@ _REQUIRED: dict[str, list[tuple[str, str]]] = {
         ("policy_number",   "Policy Number"),
         ("claimed_amount",  "Claimed Amount"),
         ("signature_present", "Claimant Signature"),
+        ("diagnosis",       "Diagnosis"),
     ],
     DOCTYPE_HOSPITAL_BILL: [
         ("patient_name",    "Patient Name"),
         ("hospital_name",   "Hospital Name"),
         ("bill_date",       "Bill Date"),
         ("total_amount",    "Total Amount"),
+        ("diagnosis",       "Diagnosis"),
     ],
 }
 
 _SIGNATURE_ABSENT_VALUES = {"missing", "unknown", ""}
+
+# Values that mean "this field is functionally empty"
+_EMPTY_VALUES = {"", "[not specified]", "not specified", "n/a", "unknown", "none"}
 
 
 _V5_SIGNATURE_WEIGHT = 30   # missing signature carries higher weight than other gaps
@@ -568,14 +554,15 @@ def rule_V5(docs: list[DocResult]) -> list[Finding]:
 
             for field_name, label in required_fields:
                 val, page = _get(doc, field_name)
+                val_lower = val.lower().strip()
 
                 if field_name == "signature_present":
-                    absent = val.lower() in _SIGNATURE_ABSENT_VALUES
+                    absent = val_lower in _SIGNATURE_ABSENT_VALUES
                     if absent:
                         sig_absent   = True
                         sig_evidence = _evidence(doc, page)
                 else:
-                    absent = not val
+                    absent = val_lower in _EMPTY_VALUES
                     if absent:
                         other_missing.append(label)
                         other_evidence.append(_evidence(doc, page))
@@ -641,10 +628,103 @@ def rule_V5(docs: list[DocResult]) -> list[Finding]:
 
 ALL_RULES = [rule_V1, rule_V2, rule_V3, rule_V4, rule_V5, rule_V6]
 
+# Fields whose absence causes a rule to be skipped (rule_id → required fields)
+# An entry of [] means "always run" (the rule handles its own missing-data guard).
+# For rules that need a specific document type, the check is done inline below.
+_RULE_REQUIRED_FIELDS: dict[str, list[str]] = {
+    "V1": [],   # checked inline: needs hospital bill with line_items + total_amount
+    "V2": [],   # checked inline: needs bill total_amount + form claimed_amount
+    "V3": ["patient_name"],
+    "V4": [],   # V4 skips internally when dates are missing
+    "V5": [],   # V5 always runs (checks for missing fields itself)
+    "V6": ["policy_start_date"],
+}
+
+
+def _has_field_on_doctype(docs: list[DocResult], doctype: str, field_name: str) -> bool:
+    """Return True if any doc of *doctype* has a non-empty value for *field_name*."""
+    for doc in docs:
+        if doc.get("document_type") != doctype:
+            continue
+        for f in doc["fields"]:
+            if f["name"] == field_name and (f.get("value") or "").strip() not in ("", "[]"):
+                return True
+    return False
+
+
+def _collect_all_field_values(docs: list[DocResult]) -> dict[str, str]:
+    """Flatten all non-empty field values across all docs into one dict."""
+    seen: dict[str, str] = {}
+    for doc in docs:
+        for f in doc["fields"]:
+            name = f["name"]
+            val  = (f.get("value") or "").strip()
+            if val and name not in seen:
+                seen[name] = val
+    return seen
+
 
 def run_all_rules(docs: list[DocResult]) -> list[Finding]:
-    """Run every validation rule and return the combined list of findings."""
+    """
+    Normalise field values, then run every validation rule.
+
+    Logs per claim:
+      - which rules ran
+      - which were skipped (and why – missing required field)
+      - which fired (produced findings)
+    """
+    from app.rules.normalise import patch_all_docs
+
+    # ── 1. Normalise all extracted field values before rules run ─────────────
+    docs = patch_all_docs(docs)
+
+    all_fields = _collect_all_field_values(docs)
+
     results: list[Finding] = []
-    for rule in ALL_RULES:
-        results.extend(rule(docs))
+
+    for rule_fn in ALL_RULES:
+        rule_key = rule_fn.__name__.replace("rule_", "").upper()  # e.g. "V1"
+        required = _RULE_REQUIRED_FIELDS.get(rule_key, [])
+
+        # Per-rule skip logic for rules that need a specific document type
+        if rule_key == "V1":
+            if not _has_field_on_doctype(docs, "hospital_bill", "line_items"):
+                log.info("RULE %s SKIPPED – line_items missing on hospital bill", rule_fn.__name__)
+                continue
+            if not _has_field_on_doctype(docs, "hospital_bill", "total_amount"):
+                log.info("RULE %s SKIPPED – total_amount missing on hospital bill", rule_fn.__name__)
+                continue
+        elif rule_key == "V2":
+            if not _has_field_on_doctype(docs, "hospital_bill", "total_amount"):
+                log.info("RULE %s SKIPPED – total_amount missing on hospital bill", rule_fn.__name__)
+                continue
+            if not _has_field_on_doctype(docs, "claim_form", "claimed_amount"):
+                log.info("RULE %s SKIPPED – claimed_amount missing on claim form", rule_fn.__name__)
+                continue
+        else:
+            # Generic field check against any document
+            missing_fields = [f for f in required if not all_fields.get(f)]
+            if missing_fields:
+                log.info(
+                    "RULE %s SKIPPED – missing required field(s): %s",
+                    rule_fn.__name__,
+                    ", ".join(missing_fields),
+                )
+                continue
+
+        log.info("RULE %s running", rule_fn.__name__)
+        new_findings = rule_fn(docs)
+
+        if new_findings:
+            log.info(
+                "RULE %s FIRED – %d finding(s): %s",
+                rule_fn.__name__,
+                len(new_findings),
+                "; ".join(f["rule_id"] for f in new_findings),
+            )
+        else:
+            log.info("RULE %s passed (no findings)", rule_fn.__name__)
+
+        results.extend(new_findings)
+
     return results

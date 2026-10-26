@@ -26,6 +26,7 @@ Public helpers
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,6 +38,8 @@ from rapidfuzz import fuzz
 # ── re-use shared types from validation ──────────────────────────────────────
 
 from app.rules.validation import Evidence, Finding, DocResult
+
+log = logging.getLogger(__name__)
 
 
 # ── additional input types ────────────────────────────────────────────────────
@@ -85,23 +88,13 @@ def _get(doc: DocResult, field_name: str) -> tuple[str, int]:
 
 
 def _amount(raw: str) -> float | None:
-    m = re.search(r"([\d,]+(?:\.\d{1,2})?)", raw)
-    if not m:
-        return None
-    try:
-        return float(m.group(1).replace(",", ""))
-    except ValueError:
-        return None
+    from app.rules.normalise import normalise_amount
+    return normalise_amount(raw)
 
 
 def _parse_date(raw: str) -> datetime | None:
-    raw = re.sub(r"[./]", "-", raw.strip())
-    for fmt in ("%d-%b-%Y", "%d-%m-%Y", "%d-%b-%y", "%d-%m-%y"):
-        try:
-            return datetime.strptime(raw, fmt)
-        except ValueError:
-            continue
-    return None
+    from app.rules.normalise import normalise_date
+    return normalise_date(raw)
 
 
 def _doc_by_type(docs: list[DocResult], dtype: str) -> list[DocResult]:
@@ -382,7 +375,7 @@ def rule_F3(docs: list[DocResult]) -> list[Finding]:
     (i.e. are exact round numbers), which is statistically unusual for
     legitimate itemised medical invoices.
 
-    Weight 10.
+    Weight 5 (capped – minor indicator, never dominates over substantive findings).
     """
     findings: list[Finding] = []
 
@@ -413,7 +406,7 @@ def rule_F3(docs: list[DocResult]) -> list[Finding]:
         findings.append(Finding(
             rule_id="F3-ROUND-NUMBER-BILLING",
             severity="low",
-            weight=10,
+            weight=5,
             what=(
                 f"Risk indicator: {round_count} of {len(items)} line items "
                 f"({pct_str}) are round-number amounts ending in .00"
@@ -623,6 +616,11 @@ def compute_risk(findings: list[Finding]) -> RiskResult:
 
     The final level is the maximum of the score-based level and any applicable
     floor (Low < Medium < High).
+
+    Round-number rule (F3) suppression
+    -----------------------------------
+    F3-ROUND-NUMBER-BILLING is demoted from the top reason whenever any
+    other finding also exists.  Its "what" text is appended last.
     """
     score = min(sum(f["weight"] for f in findings), 100)
 
@@ -640,7 +638,7 @@ def compute_risk(findings: list[Finding]) -> RiskResult:
     for f in findings:
         if any(f["rule_id"].startswith(p) for p in _DUPLICATE_RULE_PREFIXES):
             level = "High"
-            break                    # can't go higher, stop early
+            break
 
     if level != "High":
         for f in findings:
@@ -649,7 +647,10 @@ def compute_risk(findings: list[Finding]) -> RiskResult:
                     level = "Medium"
                 break
 
-    reasons = [f["what"] for f in findings]
+    # ── reason ordering: F3 (round-number) is never the top entry ────────
+    non_f3 = [f["what"] for f in findings if f["rule_id"] != "F3-ROUND-NUMBER-BILLING"]
+    f3_    = [f["what"] for f in findings if f["rule_id"] == "F3-ROUND-NUMBER-BILLING"]
+    reasons = non_f3 + f3_    # F3 goes last; if it is the only finding, it ends up first
 
     return RiskResult(
         risk_score=score,
@@ -673,7 +674,12 @@ def run_fraud_rules(
     policy_start_date:  str | None               = None,
 ) -> list[Finding]:
     """
-    Run all fraud / risk-indicator rules and return the combined findings.
+    Normalise docs, then run all fraud / risk-indicator rules.
+
+    Logs per claim:
+      - which rules ran
+      - which were skipped because a prerequisite field is missing
+      - which fired (produced findings)
 
     Parameters
     ----------
@@ -683,11 +689,106 @@ def run_fraud_rules(
     file_paths         : absolute paths to the uploaded files (same order as docs)
     policy_start_date  : policy inception date as a parseable date string
     """
+    from app.rules.normalise import patch_all_docs
+
+    # ── normalise all field values first ─────────────────────────────────────
+    docs = patch_all_docs(docs)
+
     results: list[Finding] = []
-    results.extend(rule_F1(docs, prior_claims or []))
-    results.extend(rule_F2(docs, prior_claims or [], file_hashes or []))
-    results.extend(rule_F2b(docs, prior_claims or []))
-    results.extend(rule_F3(docs))
-    results.extend(rule_F4(docs, policy_start_date))
-    results.extend(rule_F5(docs, file_paths or []))
+
+    # ── F1: near-duplicate ────────────────────────────────────────────────────
+    _prior = prior_claims or []
+    if not _prior:
+        log.info("RULE rule_F1 SKIPPED – no prior claims available")
+    else:
+        log.info("RULE rule_F1 running")
+        new = rule_F1(docs, _prior)
+        _log_findings("rule_F1", new)
+        results.extend(new)
+
+    # ── F2: file hash duplicate ───────────────────────────────────────────────
+    _hashes = file_hashes or []
+    prior_with_hashes = [p for p in _prior if p.get("file_hash")]
+    if not prior_with_hashes or not _hashes:
+        log.info("RULE rule_F2 SKIPPED – no file hashes to compare")
+    else:
+        log.info("RULE rule_F2 running")
+        new = rule_F2(docs, _prior, _hashes)
+        _log_findings("rule_F2", new)
+        results.extend(new)
+
+    # ── F2b: same bill number ─────────────────────────────────────────────────
+    _bill_val = _first_field_value(docs, "bill_number")
+    if not _bill_val:
+        log.info("RULE rule_F2b SKIPPED – bill_number field missing")
+    elif not _prior:
+        log.info("RULE rule_F2b SKIPPED – no prior claims available")
+    else:
+        log.info("RULE rule_F2b running")
+        new = rule_F2b(docs, _prior)
+        _log_findings("rule_F2b", new)
+        results.extend(new)
+
+    # ── F3: round-number billing ──────────────────────────────────────────────
+    # Check if ANY hospital bill has non-empty line items
+    _has_items = any(
+        f["name"] == "line_items" and (f.get("value") or "").strip() not in ("", "[]")
+        for doc in docs if doc.get("document_type") == "hospital_bill"
+        for f in doc.get("fields", [])
+    )
+    if not _has_items:
+        log.info("RULE rule_F3 SKIPPED – line_items field missing or empty on hospital bill")
+    else:
+        log.info("RULE rule_F3 running")
+        new = rule_F3(docs)
+        _log_findings("rule_F3", new)
+        results.extend(new)
+
+    # ── F4: early claim ───────────────────────────────────────────────────────
+    # Use the passed-in policy_start_date, or fall back to what's in the docs
+    _psd = policy_start_date
+    if not _psd:
+        _psd = _first_field_value(docs, "policy_start_date")
+    _adm = _first_field_value(docs, "admission_date")
+    if not _psd:
+        log.info("RULE rule_F4 SKIPPED – policy_start_date not available")
+    elif not _adm:
+        log.info("RULE rule_F4 SKIPPED – admission_date field missing")
+    else:
+        log.info("RULE rule_F4 running")
+        new = rule_F4(docs, _psd)
+        _log_findings("rule_F4", new)
+        results.extend(new)
+
+    # ── F5: PDF modified after creation ──────────────────────────────────────
+    _paths = file_paths or []
+    if not _paths:
+        log.info("RULE rule_F5 SKIPPED – no file_paths provided")
+    else:
+        log.info("RULE rule_F5 running")
+        new = rule_F5(docs, _paths)
+        _log_findings("rule_F5", new)
+        results.extend(new)
+
     return results
+
+
+def _first_field_value(docs: list[DocResult], field_name: str) -> str:
+    """Return the first non-empty value for *field_name* across all docs."""
+    for doc in docs:
+        for f in doc.get("fields", []):
+            if f["name"] == field_name and (f.get("value") or "").strip():
+                return f["value"].strip()
+    return ""
+
+
+def _log_findings(rule_name: str, findings: list[Finding]) -> None:
+    if findings:
+        log.info(
+            "RULE %s FIRED – %d finding(s): %s",
+            rule_name,
+            len(findings),
+            "; ".join(f["rule_id"] for f in findings),
+        )
+    else:
+        log.info("RULE %s passed (no findings)", rule_name)

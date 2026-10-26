@@ -80,11 +80,14 @@ def _make_pdf_bytes() -> bytes:
 
 @pytest.fixture(autouse=True)
 def clear_cache():
-    """Clear the extraction cache before each test."""
-    from app.extraction import _extraction_cache
-    _extraction_cache.clear()
-    yield
-    _extraction_cache.clear()
+    """Clear the extraction cache before each test and suppress disk writes."""
+    import app.extraction as _ext
+    # Reset the in-memory mirror so each test starts fresh
+    _ext._mem_cache = {}
+    # Suppress all disk I/O so tests never touch the real cache file
+    with patch("app.extraction._save_cache"):
+        yield
+    _ext._mem_cache = {}
 
 
 @pytest.fixture()
@@ -367,7 +370,7 @@ class TestCaching:
             result1 = extract_document(tmp_pdf)
             result2 = extract_document(tmp_pdf)
 
-        # API should only have been called once
+        # API should only have been called once — second call hits _mem_cache
         assert mock_client.models.generate_content.call_count == 1
         assert result1["document_type"] == result2["document_type"]
 
@@ -481,3 +484,93 @@ class TestDateConversion:
         fields = {f["name"]: f["value"] for f in result["fields"]}
         assert fields["admission_date"] == ""
         assert fields["discharge_date"] == ""
+
+
+class TestDisagreementDetection:
+    """
+    When Gemma and regex both produce a non-empty value for a key field but
+    they disagree, the field confidence should drop to 0.5 and a note should
+    be appended to the value.
+    """
+
+    def test_disagreement_lowers_confidence(self, tmp_pdf, monkeypatch):
+        """Gemma says patient_name='Alice' but regex finds 'Arjun Sharma'."""
+        monkeypatch.setenv("EXTRACTION_MODE", "gemma")
+        # Gemma returns a different patient name than what regex finds in the PDF text
+        payload = _build_gemma_json({"patient_name": "Alice Smith"})
+        mock_client = MagicMock()
+        mock_client.models.generate_content.return_value = _make_mock_response(payload)
+
+        with patch("app.extraction._load_gemini_client", return_value=mock_client):
+            from app.extraction import extract_document
+            result = extract_document(tmp_pdf)
+
+        fields = {f["name"]: f for f in result["fields"]}
+        patient = fields["patient_name"]
+        # The PDF has "Arjun Sharma" extracted by regex; Gemma returns "Alice Smith"
+        # so confidence must be CONF_DISAGREE (0.5) and value contains the note
+        assert patient["confidence"] == pytest.approx(0.5)
+        assert "Gemma and regex disagree" in patient["value"]
+
+    def test_agreement_keeps_confidence(self, tmp_pdf, monkeypatch):
+        """When both methods agree, confidence stays at the Gemma-reported value."""
+        monkeypatch.setenv("EXTRACTION_MODE", "gemma")
+        # Both Gemma and regex will produce an empty patient_name for this fixture PDF
+        # (the PDF text says "Patient Name\nArjun Sharma", regex extracts it)
+        # Make Gemma also return the same name
+        payload = _build_gemma_json({
+            "patient_name": "Arjun Sharma",
+            "confidence": {"patient_name": 0.95},
+        })
+        mock_client = MagicMock()
+        mock_client.models.generate_content.return_value = _make_mock_response(payload)
+
+        with patch("app.extraction._load_gemini_client", return_value=mock_client):
+            from app.extraction import extract_document
+            result = extract_document(tmp_pdf)
+
+        fields = {f["name"]: f for f in result["fields"]}
+        patient = fields["patient_name"]
+        assert patient["confidence"] == pytest.approx(0.95)
+        assert "disagree" not in patient["value"]
+
+    def test_null_gemma_field_no_disagreement(self, tmp_pdf, monkeypatch):
+        """If Gemma returns null for a field, no disagreement note should be added."""
+        monkeypatch.setenv("EXTRACTION_MODE", "gemma")
+        payload = _build_gemma_json({"patient_name": None})
+        mock_client = MagicMock()
+        mock_client.models.generate_content.return_value = _make_mock_response(payload)
+
+        with patch("app.extraction._load_gemini_client", return_value=mock_client):
+            from app.extraction import extract_document
+            result = extract_document(tmp_pdf)
+
+        fields = {f["name"]: f for f in result["fields"]}
+        patient = fields["patient_name"]
+        assert "disagree" not in patient["value"]
+
+
+class TestParallelExtraction:
+    """Tests for extract_documents_parallel()."""
+
+    def test_parallel_returns_all_results(self, tmp_pdf, tmp_path, monkeypatch):
+        """extract_documents_parallel returns one result per input file."""
+        monkeypatch.setenv("EXTRACTION_MODE", "regex")
+        from app.extraction import extract_documents_parallel
+        # Create three copies of the same PDF
+        paths = []
+        for i in range(3):
+            p = tmp_path / f"doc_{i}.pdf"
+            p.write_bytes(tmp_pdf.read_bytes())
+            paths.append(p)
+
+        results = extract_documents_parallel(paths, max_workers=3)
+        assert len(results) == 3
+        for r in results:
+            assert r["extraction_method"] == "regex-fallback"
+
+    def test_parallel_empty_list(self, monkeypatch):
+        """Empty input returns an empty list without error."""
+        monkeypatch.setenv("EXTRACTION_MODE", "regex")
+        from app.extraction import extract_documents_parallel
+        assert extract_documents_parallel([]) == []

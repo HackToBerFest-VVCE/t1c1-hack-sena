@@ -4,7 +4,7 @@
   align-items: center;
   justify-content: center;
   background: linear-gradient(135deg, #1a56db 0%, #1240ab 100%);
-  padding: 1rem;
+  padding: 1.5rem 1rem;
 }
 
 .login-card {
@@ -13,7 +13,7 @@
   box-shadow: 0 8px 40px rgba(0, 0, 0, 0.18);
   padding: 2.5rem 2rem;
   width: 100%;
-  max-width: 420px;
+  max-width: 440px;
 }
 
 .login-brand {
@@ -37,7 +37,44 @@
 .login-tagline {
   font-size: 0.82rem;
   color: #64748b;
-  margin-bottom: 1.75rem;
+  margin-bottom: 1.5rem;
+}
+
+/* Tabs */
+.auth-tabs {
+  display: flex;
+  border-bottom: 2px solid #e2e8f0;
+  margin-bottom: 1.5rem;
+  gap: 0.5rem;
+}
+
+.auth-tab-btn {
+  flex: 1;
+  padding: 0.65rem 0.5rem;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #64748b;
+  cursor: pointer;
+  transition: all 0.18s;
+  font-family: inherit;
+}
+
+.auth-tab-btn:hover {
+  color: #1a56db;
+}
+
+.auth-tab-btn.active {
+  color: #1a56db;
+  border-bottom-color: #1a56db;
+}
+
+/* Form inputs & labels */
+.form-group {
+  margin-bottom: 1rem;
 }
 
 .login-label {
@@ -45,7 +82,13 @@
   font-size: 0.82rem;
   font-weight: 600;
   color: #374151;
-  margin-bottom: 0.4rem;
+  margin-bottom: 0.35rem;
+}
+
+.input-with-toggle {
+  position: relative;
+  display: flex;
+  align-items: center;
 }
 
 .login-input {
@@ -60,69 +103,138 @@
   transition: border-color 0.18s;
 }
 
+.input-with-toggle .login-input {
+  padding-right: 3.4rem;
+}
+
 .login-input:focus {
   border-color: #1a56db;
 }
 
-/* role selector */
-.role-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0.75rem;
-  margin-top: 0.4rem;
+.login-input.has-error {
+  border-color: #dc2626;
 }
 
-.role-card {
+.toggle-pwd-btn {
+  position: absolute;
+  right: 0.65rem;
+  background: none;
+  border: none;
+  color: #64748b;
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0.25rem 0.4rem;
+  border-radius: 4px;
+  font-family: inherit;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  transition: color 0.15s, background-color 0.15s;
+}
+
+.toggle-pwd-btn:hover {
+  color: #1a56db;
+  background: #f1f5f9;
+}
+
+.field-error {
+  color: #dc2626;
+  font-size: 0.75rem;
+  margin-top: 0.3rem;
+  display: block;
+}
+
+.general-error {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #b91c1c;
+  padding: 0.6rem 0.85rem;
+  border-radius: 6px;
+  font-size: 0.82rem;
+  margin-bottom: 1.25rem;
+}
+
+/* Password strength */
+.pwd-strength-container {
+  margin-top: 0.4rem;
+  font-size: 0.75rem;
+}
+
+.pwd-strength-meter {
+  height: 4px;
+  width: 100%;
+  background: #e2e8f0;
+  border-radius: 2px;
+  margin-bottom: 0.35rem;
+  overflow: hidden;
+}
+
+.pwd-strength-bar {
+  height: 100%;
+  transition: width 0.25s ease, background-color 0.25s ease;
+}
+
+.pwd-strength-bar.weak {
+  width: 33%;
+  background-color: #ef4444;
+}
+
+.pwd-strength-bar.medium {
+  width: 66%;
+  background-color: #f59e0b;
+}
+
+.pwd-strength-bar.strong {
+  width: 100%;
+  background-color: #10b981;
+}
+
+.pwd-hints {
   display: flex;
-  flex-direction: column;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+
+.pwd-hint-item {
+  display: inline-flex;
   align-items: center;
   gap: 0.25rem;
-  padding: 0.85rem 0.5rem;
-  border: 2px solid #d1daea;
-  border-radius: 9px;
-  background: #f4f7fc;
+  color: #94a3b8;
+  font-size: 0.72rem;
+}
+
+.pwd-hint-item.valid {
+  color: #16a34a;
+  font-weight: 600;
+}
+
+/* Invite code toggle */
+.invite-toggle-btn {
+  background: none;
+  border: none;
+  color: #1a56db;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 0;
+  margin-bottom: 1rem;
   cursor: pointer;
-  transition: border-color 0.18s, background 0.18s;
+  text-align: left;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
   font-family: inherit;
 }
 
-.role-card:hover {
-  border-color: #3b7de8;
-  background: #e8f0fe;
+.invite-toggle-btn:hover {
+  text-decoration: underline;
 }
 
-.role-card.selected {
-  border-color: #1a56db;
-  background: #e8f0fe;
-}
-
-.role-icon {
-  font-size: 1.5rem;
-}
-
-.role-name {
-  font-size: 0.9rem;
-  font-weight: 700;
-  color: #1a202c;
-}
-
-.role-desc {
-  font-size: 0.73rem;
-  color: #64748b;
-  text-align: center;
-  line-height: 1.3;
-}
-
-.login-error {
-  color: #dc2626;
-  font-size: 0.82rem;
-  margin-top: 0.75rem;
-}
-
+/* Submit button */
 .login-btn {
   display: block;
   width: 100%;
-  margin-top: 1.5rem;
+  margin-top: 1.25rem;
   padding: 0.75rem;
   background: #1a56db;
   color: #ffffff;
@@ -132,9 +244,26 @@
   font-weight: 700;
   font-family: inherit;
   cursor: pointer;
-  transition: background 0.18s;
+  transition: background 0.18s, opacity 0.18s;
 }
 
-.login-btn:hover {
+.login-btn:hover:not(:disabled) {
   background: #1240ab;
+}
+
+.login-btn:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+/* Demo system note */
+.demo-system-note {
+  margin-top: 1.5rem;
+  padding: 0.55rem 0.8rem;
+  background: #f8fafc;
+  border-radius: 6px;
+  border: 1px dashed #cbd5e1;
+  font-size: 0.75rem;
+  color: #64748b;
+  text-align: center;
 }

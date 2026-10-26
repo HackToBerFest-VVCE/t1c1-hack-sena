@@ -32,11 +32,13 @@ export interface Field {
 // The UI constructs those URLs at render time.
 
 export interface Document {
-  id:            number
-  filename:      string
-  document_type: DocumentType
-  page_count:    number
-  fields:        Field[]
+  id:                 number
+  filename:           string
+  document_type:      DocumentType
+  page_count:         number
+  fields:             Field[]
+  extraction_method?: string   // "gemma-4" | "regex-fallback" | ""
+  model_name?:        string   // model identifier or ""
 }
 
 // ── Finding: one risk/anomaly flag raised by a rule ───────────────────────────

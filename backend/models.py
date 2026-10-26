@@ -126,6 +126,9 @@ class Document(Base):
                    )
     page_count:    Mapped[int]          = mapped_column(Integer, nullable=False, default=1)
     raw_text:      Mapped[str | None]   = mapped_column(Text, nullable=True)
+    # Extraction provenance – which path produced this document's fields
+    extraction_method: Mapped[str]      = mapped_column(String(64),  nullable=False, default="")
+    model_name:        Mapped[str]      = mapped_column(String(128), nullable=False, default="")
 
     # relationships
     claim:  Mapped["Claim"]               = relationship("Claim", back_populates="documents")
@@ -240,3 +243,29 @@ class AuditLog(Base):
             f"<AuditLog id={self.id} user={self.user!r}"
             f" action={self.action!r} claim={self.claim_id!r}>"
         )
+
+
+# ── User ──────────────────────────────────────────────────────────────────────
+
+class User(Base):
+    """
+    User account entity for authentication and RBAC.
+
+    Roles: "reviewer" | "supervisor"
+    """
+    __tablename__ = "users"
+
+    id:            Mapped[int]      = mapped_column(Integer, primary_key=True, autoincrement=True)
+    full_name:     Mapped[str]      = mapped_column(String(256), nullable=False)
+    email:         Mapped[str]      = mapped_column(String(256), unique=True, index=True, nullable=False)
+    password_hash: Mapped[str]      = mapped_column(String(256), nullable=False)
+    role:          Mapped[str]      = mapped_column(String(32),  nullable=False, default="reviewer")
+    created_at:    Mapped[datetime] = mapped_column(
+                       DateTime(timezone=True),
+                       nullable=False,
+                       default=lambda: datetime.now(timezone.utc),
+                   )
+
+    def __repr__(self) -> str:
+        return f"<User id={self.id} email={self.email!r} role={self.role!r}>"
+

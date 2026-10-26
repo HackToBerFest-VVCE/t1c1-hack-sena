@@ -1,6 +1,7 @@
 import { Component, useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { getClaim, updateField, submitDecision, getPageImageUrl } from '../api'
+import { useAuth } from '../auth'
+import { getClaim, updateField, submitDecision, getPageImageBlob } from '../api'
 import type { Claim, Document, Field, Finding, RiskLevel, ClaimStatus } from '../types'
 import './ClaimDetailPage.css'
 
@@ -36,6 +37,22 @@ function SeverityPip({ sev }: { sev: string }) {
   return <span className={`cd-sev cd-sev-${sev}`}>{sev.toUpperCase()}</span>
 }
 
+function ExtractionBadge({ method, model }: { method?: string; model?: string }) {
+  if (!method) return null
+  const isGemma = method === 'gemma-4'
+  const label   = isGemma
+    ? `Extracted by Gemma 4${model ? ` (${model})` : ''}`
+    : 'Regex fallback'
+  return (
+    <span
+      className={`cd-extraction-badge ${isGemma ? 'cd-extraction-gemma' : 'cd-extraction-regex'}`}
+      title={label}
+    >
+      {isGemma ? '✦ Gemma 4' : '⚙ Regex fallback'}
+    </span>
+  )
+}
+
 function ConfidenceBar({ value }: { value: number }) {
   const pct = Math.round(value * 100)
   const cls = value < 0.6 ? 'conf-low' : value < 0.85 ? 'conf-mid' : 'conf-ok'
@@ -45,6 +62,17 @@ function ConfidenceBar({ value }: { value: number }) {
       <span className={`cd-conf-pct${value < 0.6 ? ' conf-low-text' : ''}`}>{pct}%</span>
     </span>
   )
+}
+
+// ── blob cache ────────────────────────────────────────────────────────────────
+// Keyed by "claimId/docId/page". Object URLs are stored here so Prev/Next
+// reuse them without refetching and they are revoked on unmount.
+
+type BlobCacheEntry = { objectUrl: string }
+const _blobCache = new Map<string, BlobCacheEntry>()
+
+function _blobKey(claimId: string, docId: number, page: number) {
+  return `${claimId}/${docId}/${page}`
 }
 
 // ── document viewer (left pane) ───────────────────────────────────────────────
@@ -58,24 +86,68 @@ interface ViewerProps {
   onPageChange: (page: number) => void
 }
 
+type ImgState =
+  | { phase: 'loading' }
+  | { phase: 'ready'; objectUrl: string }
+  | { phase: 'error'; status: number | null }
+
 function DocumentViewer({
   claimId, docs, activeDocId, activePage, onDocChange, onPageChange,
 }: ViewerProps) {
-  const [imgError, setImgError] = useState(false)
+  const [imgState, setImgState] = useState<ImgState>({ phase: 'loading' })
+  // Track the key we're currently showing so stale responses are discarded.
+  const pendingKey = useRef<string>('')
 
-  // Reset error state whenever the image URL changes
   const doc     = docs.find(d => d.id === activeDocId) ?? docs[0] ?? null
   const maxPage = doc?.page_count ?? 1
-
-  // Clamp activePage within [1, maxPage] in case a doc switch leaves it out of range
   const safePage = Math.min(Math.max(activePage, 1), maxPage)
 
-  const imgUrl = doc
-    ? getPageImageUrl(claimId, doc.id, safePage)
-    : null
+  useEffect(() => {
+    if (!doc) return
 
-  // Reset error flag when the URL changes (different doc or page)
-  useEffect(() => { setImgError(false) }, [imgUrl])
+    const key = _blobKey(claimId, doc.id, safePage)
+
+    // Cache hit — use the existing object URL immediately.
+    const cached = _blobCache.get(key)
+    if (cached) {
+      setImgState({ phase: 'ready', objectUrl: cached.objectUrl })
+      return
+    }
+
+    // Cache miss — fetch via authenticated axios.
+    setImgState({ phase: 'loading' })
+    pendingKey.current = key
+
+    getPageImageBlob(claimId, doc.id, safePage)
+      .then(blob => {
+        // Discard if the user navigated away while this was in-flight.
+        if (pendingKey.current !== key) return
+        const objectUrl = URL.createObjectURL(blob)
+        _blobCache.set(key, { objectUrl })
+        setImgState({ phase: 'ready', objectUrl })
+      })
+      .catch((err: unknown) => {
+        if (pendingKey.current !== key) return
+        // Try to pull the HTTP status from an axios error.
+        const status: number | null =
+          (err && typeof err === 'object' && 'response' in err &&
+            (err as { response?: { status?: number } }).response?.status != null)
+            ? (err as { response: { status: number } }).response.status
+            : null
+        setImgState({ phase: 'error', status })
+      })
+
+    // On unmount or before the next effect run, mark the pending key stale.
+    return () => { pendingKey.current = '' }
+  }, [claimId, doc?.id, safePage])   // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Revoke all cached object URLs when the viewer unmounts (claim page left).
+  useEffect(() => {
+    return () => {
+      _blobCache.forEach(entry => URL.revokeObjectURL(entry.objectUrl))
+      _blobCache.clear()
+    }
+  }, [])   // run only on mount/unmount
 
   if (docs.length === 0) {
     return (
@@ -113,28 +185,34 @@ function DocumentViewer({
           <span className="cd-doc-pages">
             {doc.page_count} page{doc.page_count !== 1 ? 's' : ''}
           </span>
+          <ExtractionBadge method={doc.extraction_method} model={doc.model_name} />
         </div>
       )}
 
       {/* page image */}
       <div className="cd-page-frame">
-        {imgUrl && !imgError ? (
+        {imgState.phase === 'loading' && (
+          <div className="cd-page-skeleton" aria-label="Loading page image…" />
+        )}
+
+        {imgState.phase === 'ready' && (
           <img
-            key={imgUrl}                   /* remount on URL change so onError resets */
-            src={imgUrl}
+            src={imgState.objectUrl}
             alt={`${doc?.filename ?? 'document'} – page ${safePage}`}
             className="cd-page-img"
-            onError={() => setImgError(true)}
           />
-        ) : (
+        )}
+
+        {imgState.phase === 'error' && (
           <div className="cd-page-placeholder">
-            <span>{imgError ? '⚠️' : '📄'}</span>
-            <span>{imgError ? 'Image not available' : (doc?.filename ?? '')}</span>
-            {imgError && (
-              <span className="cd-page-placeholder-sub">
-                Could not load page {safePage} from the server.
-              </span>
-            )}
+            <span>⚠️</span>
+            <span>Image not available</span>
+            <span className="cd-page-placeholder-sub">
+              Could not load page {safePage} from the server.
+              {imgState.status != null && (
+                <span className="cd-page-err-status"> (HTTP {imgState.status})</span>
+              )}
+            </span>
           </div>
         )}
       </div>
@@ -363,6 +441,10 @@ interface DecisionBarProps {
 }
 
 function DecisionBar({ claimId, status, onDecided }: DecisionBarProps) {
+  const { user } = useAuth()
+  const isSupervisor = user?.role === 'Supervisor'
+  const visibleDecisions = DECISIONS.filter(d => isSupervisor || d.key === 'queried')
+
   const [pending, setPending] = useState<Decision | null>(null)
   const [comment, setComment] = useState('')
   const [saving,  setSaving]  = useState(false)
@@ -395,7 +477,7 @@ function DecisionBar({ claimId, status, onDecided }: DecisionBarProps) {
       </div>
 
       <div className="cd-decision-btns" role="group" aria-label="Adjudication actions">
-        {DECISIONS.map(d => (
+        {visibleDecisions.map(d => (
           <button
             key={d.key}
             className={`cd-dec-btn ${d.cls}${status === d.key ? ' is-current' : ''}`}

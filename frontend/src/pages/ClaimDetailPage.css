@@ -223,6 +223,31 @@
   padding: 0.1rem 0.4rem;
 }
 
+/* ── extraction method badge ────────────────────────────────────────────── */
+
+.cd-extraction-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 0.15rem 0.5rem;
+  border-radius: 20px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  letter-spacing: 0.01em;
+}
+.cd-extraction-gemma {
+  background: #ede9fe;
+  color: #5b21b6;
+  border: 1px solid #c4b5fd;
+}
+.cd-extraction-regex {
+  background: #f1f5f9;
+  color: #475569;
+  border: 1px solid #cbd5e1;
+}
+
 /* page image frame */
 .cd-page-frame {
   overflow: auto;
@@ -244,6 +269,21 @@
   background: var(--white);
 }
 
+/* Loading skeleton — pulses while the blob is in-flight */
+.cd-page-skeleton {
+  width: 100%;
+  max-width: 340px;
+  min-height: 440px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, #e2e8f0 25%, #cbd5e1 50%, #e2e8f0 75%);
+  background-size: 200% 100%;
+  animation: cd-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes cd-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
 .cd-page-placeholder {
   display: flex;
   flex-direction: column;
@@ -256,6 +296,12 @@
 }
 .cd-page-placeholder span:first-child { font-size: 2.5rem; }
 .cd-page-placeholder-sub { font-size: 0.78rem; opacity: 0.65; }
+.cd-page-err-status {
+  font-family: 'Fira Mono', 'Consolas', monospace;
+  color: var(--error);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
 
 /* pager */
 .cd-pager {
